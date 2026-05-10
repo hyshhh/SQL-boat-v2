@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>船只舷号管理系统</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>🚢 船只舷号管理系统</h1>
+  <p>管理船只舷号数据库 — 支持 CSV / SQLite 后端</p>
+</div>
+
+<div class="container">
+  <!-- 统计栏 -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="num" id="totalCount">-</div>
+      <div class="label">船只总数</div>
+    </div>
+    <div class="stat-card">
+      <div class="num" id="backendType">-</div>
+      <div class="label">数据后端</div>
+    </div>
+  </div>
+
+  <!-- 工具栏 -->
+  <div class="toolbar">
+    <input type="text" id="searchInput" placeholder="搜索舷号或描述…" />
+    <button class="btn btn-primary" onclick="openAddModal()">+ 新增船只</button>
+    <button class="btn btn-primary" onclick="openUploadModal()" style="background:#7c3aed">📷 上传图片识别</button>
+    <button class="btn btn-outline" onclick="openBulkModal()">批量导入</button>
+    <button class="btn btn-outline" onclick="loadShips()">刷新</button>
+  </div>
+
+  <!-- 表格 -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:120px">舷号</th>
+          <th>描述</th>
+          <th style="width:140px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="shipTable">
+        <tr><td colspan="3" class="empty-msg">加载中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 新增/编辑弹窗 -->
+<div class="modal-overlay" id="shipModal">
+  <div class="modal">
+    <h3 id="modalTitle">新增船只</h3>
+    <label>舷号</label>
+    <input type="text" id="modalHullNumber" placeholder="如：0014" />
+    <label>描述</label>
+    <textarea id="modalDescription" placeholder="如：白色大型客轮，上层建筑为蓝色涂装"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modalSubmitBtn" onclick="submitShip()">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量导入弹窗 -->
+<div class="modal-overlay" id="bulkModal">
+  <div class="modal">
+    <h3>批量导入</h3>
+    <label>JSON 格式：{"舷号": "描述", ...}</label>
+    <textarea id="bulkInput" rows="8" placeholder='{"A001": "你的船只描述", "A002": "另一艘船"}'></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeBulkModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitBulk()">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 图片上传识别弹窗 -->
+<div class="modal-overlay" id="uploadModal">
+  <div class="modal" style="max-width: 520px;">
+    <h3>📷 上传图片自动识别</h3>
+
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('uploadFileInput').click()">
+      <div class="icon">🖼️</div>
+      <p>点击或拖拽图片到此处</p>
+      <p style="font-size:12px;color:#aaa;margin-top:4px">支持 JPG / PNG / BMP / WebP，最大 20MB</p>
+      <div class="filename" id="uploadFilename"></div>
+      <img id="uploadPreview" class="upload-preview" style="display:none" />
+      <input type="file" id="uploadFileInput" accept="image/*" style="display:none" />
+    </div>
+
+    <div class="recognize-result" id="recognizeResult">
+      <div class="label">识别到弦号（可修改）</div>
+      <input type="text" id="recHullNumber" placeholder="弦号" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:12px;font-weight:600;color:var(--primary)" />
+      <div class="label">船只描述（可修改）</div>
+      <textarea id="recDescription" rows="3" placeholder="船只描述" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:12px;resize:vertical;font-family:inherit"></textarea>
+      <div class="exists-warn" id="recExistsWarn" style="display:none">⚠️ 该弦号已存在于数据库中，确认后将覆盖原有描述</div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeUploadModal()">取消</button>
+      <button class="btn btn-outline" id="btnRecognize" onclick="doRecognize()">🔍 识别</button>
+      <button class="btn btn-primary" id="btnConfirmAdd" onclick="doConfirmAdd()" style="display:none">
+        ✅ 确认添加
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
