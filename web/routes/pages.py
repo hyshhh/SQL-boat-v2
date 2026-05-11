@@ -14,4 +14,4 @@ router = APIRouter(tags=["pages"])
 @router.get("/")
 async def index(request: Request):
     """主页 — 船只管理界面"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
