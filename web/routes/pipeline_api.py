@@ -146,7 +146,7 @@ async def list_videos():
 
 @router.post("/videos/upload")
 async def upload_video(file: UploadFile = File(...)):
-    """上传视频到 demovid 目录（流式写入）"""
+    """上传视频到 demovid 目录（流式写入，带大小预检和超时保护）"""
     _ensure_dirs()
     cfg = _get_demo_config()
     max_size = cfg.get("max_file_size_mb", 500) * 1024 * 1024
@@ -160,6 +160,14 @@ async def upload_video(file: UploadFile = File(...)):
     if ext not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的视频格式: {ext}，支持: {', '.join(sorted(allowed))}")
 
+    # ── Content-Length 预检（拒绝明显过大的请求）──
+    content_length = file.size  # Starlette 从 Content-Length header 读取
+    if content_length and content_length > max_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件过大 ({content_length / 1024 / 1024:.0f}MB)，最大 {cfg.get('max_file_size_mb', 500)}MB",
+        )
+
     demo_dir = _get_demo_dir()
     save_path = demo_dir / filename
     if save_path.exists():
@@ -171,20 +179,45 @@ async def upload_video(file: UploadFile = File(...)):
             counter += 1
 
     total_bytes = 0
-    chunk_size = 1024 * 1024
-    with open(save_path, "wb") as f:
-        while True:
-            chunk = await file.read(chunk_size)
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if total_bytes > max_size:
-                save_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"文件过大，最大 {cfg.get('max_file_size_mb', 500)}MB",
-                )
-            f.write(chunk)
+    chunk_size = 1024 * 1024  # 1MB
+    last_activity = asyncio.get_event_loop().time()
+    timeout_seconds = 120  # 2 分钟无数据则超时
+
+    try:
+        with open(save_path, "wb") as f:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        file.read(chunk_size),
+                        timeout=timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    raise HTTPException(
+                        status_code=408,
+                        detail=f"上传超时（{timeout_seconds} 秒无数据）",
+                    )
+
+                if not chunk:
+                    break
+
+                total_bytes += len(chunk)
+                if total_bytes > max_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件过大，最大 {cfg.get('max_file_size_mb', 500)}MB",
+                    )
+
+                # 异步写入，避免阻塞事件循环
+                await asyncio.to_thread(f.write, chunk)
+                last_activity = asyncio.get_event_loop().time()
+
+    except HTTPException:
+        # 清理已写入的部分文件（句柄已由 with 关闭）
+        save_path.unlink(missing_ok=True)
+        raise
+    except Exception:
+        save_path.unlink(missing_ok=True)
+        raise
 
     logger.info("视频已上传: %s (%.2f MB)", save_path.name, total_bytes / (1024 * 1024))
 
