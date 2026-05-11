@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from config import load_config
@@ -21,7 +22,6 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 # ── 全局状态 ──
 _running_processes: dict[str, asyncio.subprocess.Process] = {}
 _task_status: dict[str, dict[str, Any]] = {}
-_camera_frames: dict[str, bytes] = {}
 
 
 def _get_demo_config() -> dict:
@@ -49,6 +49,13 @@ def _get_allowed_extensions() -> set[str]:
     return set(cfg.get("allowed_extensions", [".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm"]))
 
 
+def _get_stream_dir(task_id: str) -> Path:
+    """获取摄像头帧共享目录"""
+    d = Path("./_camera_frames") / task_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # ── 请求/响应模型 ──
 
 class PipelineStartRequest(BaseModel):
@@ -67,7 +74,7 @@ class PipelineStartResponse(BaseModel):
 
 class TaskStatusResponse(BaseModel):
     task_id: str
-    status: str  # "running", "completed", "failed"
+    status: str
     progress: str | None = None
     output_filename: str | None = None
     error: str | None = None
@@ -134,7 +141,7 @@ async def list_videos():
 
 @router.post("/videos/upload")
 async def upload_video(file: UploadFile = File(...)):
-    """上传视频到 demovid 目录（流式写入，避免大文件撑爆内存）"""
+    """上传视频到 demovid 目录（流式写入）"""
     _ensure_dirs()
     cfg = _get_demo_config()
     max_size = cfg.get("max_file_size_mb", 500) * 1024 * 1024
@@ -158,9 +165,8 @@ async def upload_video(file: UploadFile = File(...)):
             save_path = demo_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    # 流式写入，避免大文件全量读入内存
     total_bytes = 0
-    chunk_size = 1024 * 1024  # 1MB
+    chunk_size = 1024 * 1024
     with open(save_path, "wb") as f:
         while True:
             chunk = await file.read(chunk_size)
@@ -237,10 +243,15 @@ async def start_pipeline(req: PipelineStartRequest):
         cmd.append("--agent")
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
-    if req.display:
-        cmd.append("--display")
     if is_camera:
         cmd.append("--camera")
+        # 摄像头模式：通过 stream-dir 实现 MJPEG 流，不需要 --display
+        stream_dir = _get_stream_dir(task_id)
+        cmd.extend(["--stream-dir", str(stream_dir)])
+    else:
+        # 文件模式：仅在用户明确要求时传 --display
+        if req.display:
+            cmd.append("--display")
     cmd.append("--demo")
 
     logger.info("启动 Pipeline: %s (camera=%s)", " ".join(cmd), is_camera)
@@ -279,9 +290,6 @@ async def start_pipeline(req: PipelineStartRequest):
     )
 
 
-import sys  # noqa: E402 — 用于 sys.executable
-
-
 async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str):
     """异步等待 pipeline 完成，实时解析进度"""
     try:
@@ -293,11 +301,9 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
             if not text:
                 continue
 
-            # 解析进度信息
             if "进度" in text or "progress" in text.lower() or "%" in text or "处理帧" in text:
                 _task_status[task_id]["progress"] = text
 
-            # 解析最终摘要
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
                     import json
@@ -359,7 +365,60 @@ async def stop_pipeline(task_id: str):
     _task_status[task_id]["status"] = "failed"
     _task_status[task_id]["error"] = "用户手动停止"
     _running_processes.pop(task_id, None)
+    # 清理帧目录
+    _cleanup_stream_dir(task_id)
     return {"success": True, "message": f"已停止任务: {task_id}"}
+
+
+def _cleanup_stream_dir(task_id: str):
+    """清理帧共享目录"""
+    import shutil
+    d = Path("./_camera_frames") / task_id
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ── 摄像头 MJPEG 流 ──
+
+@router.get("/stream/{task_id}")
+async def camera_stream(task_id: str):
+    """MJPEG 实时流 — 从 pipeline 写入的 latest.jpg 读取帧"""
+    if task_id not in _task_status:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+    stream_dir = _get_stream_dir(task_id)
+    frame_file = stream_dir / "latest.jpg"
+
+    async def generate():
+        boundary = "--frame"
+        while task_id in _task_status and _task_status[task_id]["status"] == "running":
+            if frame_file.exists():
+                try:
+                    frame_data = frame_file.read_bytes()
+                    if frame_data:
+                        yield (
+                            f"{boundary}\r\n"
+                            f"Content-Type: image/jpeg\r\n\r\n"
+                        ).encode() + frame_data + b"\r\n"
+                    else:
+                        await asyncio.sleep(0.05)
+                        continue
+                except (OSError, FileNotFoundError):
+                    await asyncio.sleep(0.05)
+                    continue
+            else:
+                # 帧文件还没生成，发占位
+                yield (
+                    f"{boundary}\r\n"
+                    f"Content-Type: text/plain\r\n\r\n"
+                    f"等待摄像头画面...\r\n"
+                ).encode()
+            await asyncio.sleep(0.05)  # ~20fps
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 # ── 结果视频 ──
@@ -416,37 +475,6 @@ async def get_source_video(filename: str):
         ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".webm": "video/webm",
     }
     return FileResponse(path=str(video_path), media_type=mime_map.get(ext, "video/mp4"), filename=filename)
-
-
-# ── 摄像头 MJPEG 流 ──
-
-@router.get("/stream/{task_id}")
-async def camera_stream(task_id: str):
-    """MJPEG 实时流端点 — 浏览器可通过 <img src> 或 fetch 读取"""
-    if task_id not in _task_status:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-
-    async def generate():
-        boundary = "--frame"
-        while task_id in _task_status and _task_status[task_id]["status"] == "running":
-            frame = _camera_frames.get(task_id)
-            if frame:
-                yield (
-                    f"{boundary}\r\n"
-                    f"Content-Type: image/jpeg\r\n\r\n"
-                ).encode() + frame + b"\r\n"
-            else:
-                yield (
-                    f"{boundary}\r\n"
-                    f"Content-Type: text/plain\r\n\r\n"
-                    f"等待帧数据...\r\n"
-                ).encode()
-            await asyncio.sleep(0.05)
-
-    return StreamingResponse(
-        generate(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
 
 
 # ── 清理历史 ──

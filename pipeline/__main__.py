@@ -15,6 +15,7 @@ Pipeline CLI 入口 — 视频/摄像头船只识别
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import sys
@@ -29,7 +30,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("source", help="视频文件路径 / 摄像头编号(0) / RTSP 地址")
     p.add_argument("--output", "-o", default=None, help="输出视频路径")
     p.add_argument("--demo", action="store_true", help="画检测框")
-    p.add_argument("--display", action="store_true", help="弹窗实时显示")
+    p.add_argument("--display", action="store_true", help="弹窗实时显示（仅本地 GUI）")
     p.add_argument("--agent", action="store_true", help="Agent 模式")
     p.add_argument("-c", "--concurrent", action="store_true", help="并发模式")
     p.add_argument("--max-concurrent", type=int, default=4, help="最大并发数")
@@ -43,6 +44,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--conf", type=float, default=0.25, help="检测置信度")
     p.add_argument("--detect-every", type=int, default=1, help="每隔 N 帧检测一次")
     p.add_argument("--camera", action="store_true", help="摄像头模式")
+    p.add_argument("--stream-dir", default=None,
+                   help="将每帧标注结果以 latest.jpg 覆盖写入此目录（供 MJPEG 流读取）")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -64,7 +67,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     source = args.source
     is_camera = args.camera or _is_camera_source(source)
 
-    # ── 懒加载依赖（避免 CLI 以外场景强制导入）──
+    # ── 懒加载依赖 ──
     try:
         import cv2
         import numpy as np
@@ -88,7 +91,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     device = args.device or pipeline_cfg.get("device", "")
     conf_threshold = args.conf or pipeline_cfg.get("conf_threshold", 0.25)
     detect_every = args.detect_every or pipeline_cfg.get("detect_every_n_frames", 1)
-    detect_classes = pipeline_cfg.get("detect_classes", [8])  # 8 = boat in COCO
+    detect_classes = pipeline_cfg.get("detect_classes", [8])
 
     logger.info("加载 YOLO 模型: %s (device=%s)", yolo_model_path, device or "auto")
     model = YOLO(yolo_model_path)
@@ -126,29 +129,34 @@ def run_pipeline(args: argparse.Namespace) -> int:
         writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
         logger.info("输出视频: %s", out_path)
 
-    # ── 初始化 VLM（按需）──
+    # ── MJPEG 帧输出目录 ──
+    stream_dir: Path | None = None
+    stream_latest: Path | None = None
+    if args.stream_dir:
+        stream_dir = Path(args.stream_dir)
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        stream_latest = stream_dir / "latest.jpg"
+        logger.info("MJPEG 帧输出: %s", stream_latest)
+
+    # ── 初始化 VLM ──
     vlm = None
-    if args.agent or True:  # 当前默认都需要 VLM
-        try:
-            from langchain_openai import ChatOpenAI
-            from langchain_core.messages import HumanMessage
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage
 
-            llm_cfg = config.get("llm", {})
-            vlm = ChatOpenAI(
-                model=llm_cfg.get("model", "Qwen/Qwen3-VL-4B-AWQ"),
-                api_key=llm_cfg.get("api_key", ""),
-                base_url=llm_cfg.get("base_url", "http://localhost:7890/v1"),
-                temperature=0.0,
-                max_tokens=512,
-            )
-            logger.info("VLM 已初始化: %s", llm_cfg.get("model"))
-        except ImportError:
-            logger.warning("langchain-openai 未安装，跳过 VLM 识别")
-        except Exception as e:
-            logger.warning("VLM 初始化失败: %s（将仅做检测框标注）", e)
-
-    # ── VLM 识别函数 ──
-    import base64
+        llm_cfg = config.get("llm", {})
+        vlm = ChatOpenAI(
+            model=llm_cfg.get("model", "Qwen/Qwen3-VL-4B-AWQ"),
+            api_key=llm_cfg.get("api_key", ""),
+            base_url=llm_cfg.get("base_url", "http://localhost:7890/v1"),
+            temperature=0.0,
+            max_tokens=512,
+        )
+        logger.info("VLM 已初始化: %s", llm_cfg.get("model"))
+    except ImportError:
+        logger.warning("langchain-openai 未安装，跳过 VLM 识别")
+    except Exception as e:
+        logger.warning("VLM 初始化失败: %s（将仅做检测框标注）", e)
 
     def recognize_frame(frame_crop) -> str:
         """对裁剪区域调用 VLM 识别舷号"""
@@ -168,8 +176,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
             logger.debug("VLM 识别异常: %s", e)
             return ""
 
-    # ── 显示窗口 ──
-    display_enabled = args.display
+    # ── 显示窗口（仅 --display 且非 stream-dir 模式）──
+    display_enabled = args.display and not stream_dir
     if display_enabled:
         try:
             cv2.namedWindow("Pipeline", cv2.WINDOW_NORMAL)
@@ -186,7 +194,6 @@ def run_pipeline(args: argparse.Namespace) -> int:
     process_every = args.process_every or 15
     tracker_name = pipeline_cfg.get("tracker", "bytetrack")
 
-    # 船舶跟踪缓存：track_id -> (hull_number, last_recognized_frame)
     track_cache: dict[int, tuple[str, int]] = {}
     enable_refresh = args.enable_refresh
     gap_num = args.gap_num
@@ -208,7 +215,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             if max_frames > 0 and frame_idx > max_frames:
                 break
 
-            annotated = frame.copy() if args.demo else None
+            annotated = frame.copy() if (args.demo or stream_dir) else None
 
             # ── YOLO 检测 ──
             run_detection = (frame_idx % detect_every == 1) or (frame_idx == 1)
@@ -233,7 +240,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                         track_id = int(boxes.id[i]) if has_ids and boxes.id is not None else -1
                         detections_total += 1
 
-                        # 裁剪检测区域用于 VLM 识别
+                        # VLM 识别
                         if frame_idx % process_every == 0 or frame_idx == 1:
                             crop = frame[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
                             if crop.size > 0:
@@ -262,13 +269,20 @@ def run_pipeline(args: argparse.Namespace) -> int:
                             cv2.putText(annotated, label, (x1, y1 - 8),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # ── 写入输出 ──
+            # ── 写入输出视频 ──
             if writer and annotated is not None:
                 writer.write(annotated)
             elif writer:
                 writer.write(frame)
 
-            # ── 实时显示 ──
+            # ── 写入 MJPEG 帧（覆盖 latest.jpg）──
+            if stream_latest and annotated is not None:
+                try:
+                    cv2.imwrite(str(stream_latest), annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                except Exception:
+                    pass
+
+            # ── 弹窗显示 ──
             if display_enabled and annotated is not None:
                 try:
                     cv2.imshow("Pipeline", annotated)
@@ -299,6 +313,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
             writer.release()
         if display_enabled:
             cv2.destroyAllWindows()
+        # 清理帧文件
+        if stream_latest and stream_latest.exists():
+            try:
+                stream_latest.unlink()
+            except Exception:
+                pass
 
     # ── 汇总 ──
     elapsed = time.time() - start_time
@@ -311,7 +331,6 @@ def run_pipeline(args: argparse.Namespace) -> int:
         for tid, (hn, _) in sorted(track_cache.items()):
             logger.info("  Track %d → %s", tid, hn)
 
-    # 输出 JSON 摘要到 stdout（供 API 解析）
     summary = {
         "total_frames": frame_idx,
         "elapsed_seconds": round(elapsed, 1),
