@@ -3,13 +3,6 @@ Pipeline CLI 入口 — 视频/摄像头船只识别
 
 用法:
     python -m pipeline <video_path> [选项]
-
-示例:
-    python -m pipeline video.mp4 --demo -o result.mp4
-    python -m pipeline video.mp4 --demo -c --max-concurrent 8 -o result.mp4
-    python -m pipeline video.mp4 --agent --demo -o result.mp4
-    python -m pipeline 0 --demo --display          # 本地摄像头
-    python -m pipeline rtsp://... --demo --display  # RTSP 流
 """
 
 from __future__ import annotations
@@ -18,6 +11,7 @@ import argparse
 import base64
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -45,7 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--detect-every", type=int, default=1, help="每隔 N 帧检测一次")
     p.add_argument("--camera", action="store_true", help="摄像头模式")
     p.add_argument("--stream-dir", default=None,
-                   help="将每帧标注结果以 latest.jpg 覆盖写入此目录（供 MJPEG 流读取）")
+                   help="将每帧标注结果以 latest.jpg 写入此目录（供 MJPEG 流读取）")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -54,6 +48,16 @@ def _is_camera_source(source: str) -> bool:
     if source.isdigit():
         return True
     return source.startswith(("rtsp://", "rtmp://", "http://", "https://"))
+
+
+def _atomic_write_jpg(path: Path, data: bytes) -> None:
+    """原子写入 JPEG：先写临时文件，再 rename（保证读端不会读到半截）"""
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.rename(path)
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
@@ -176,7 +180,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             logger.debug("VLM 识别异常: %s", e)
             return ""
 
-    # ── 显示窗口（仅 --display 且非 stream-dir 模式）──
+    # ── 显示窗口（仅 --display 且无 stream-dir）──
     display_enabled = args.display and not stream_dir
     if display_enabled:
         try:
@@ -275,10 +279,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
             elif writer:
                 writer.write(frame)
 
-            # ── 写入 MJPEG 帧（覆盖 latest.jpg）──
+            # ── 写入 MJPEG 帧（原子写入，避免读到半截 JPEG）──
             if stream_latest and annotated is not None:
                 try:
-                    cv2.imwrite(str(stream_latest), annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    _atomic_write_jpg(stream_latest, buf.tobytes())
                 except Exception:
                     pass
 
@@ -313,12 +318,6 @@ def run_pipeline(args: argparse.Namespace) -> int:
             writer.release()
         if display_enabled:
             cv2.destroyAllWindows()
-        # 清理帧文件
-        if stream_latest and stream_latest.exists():
-            try:
-                stream_latest.unlink()
-            except Exception:
-                pass
 
     # ── 汇总 ──
     elapsed = time.time() - start_time

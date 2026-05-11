@@ -290,8 +290,15 @@ async def start_pipeline(req: PipelineStartRequest):
     )
 
 
+async def _read_stderr(process: asyncio.subprocess.Process) -> bytes:
+    """并发读取 stderr，避免 stdout/stderr 缓冲区死锁"""
+    return await process.stderr.read()
+
+
 async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str):
     """异步等待 pipeline 完成，实时解析进度"""
+    # 启动并发 stderr 读取，避免缓冲区满导致死锁
+    stderr_task = asyncio.create_task(_read_stderr(process))
     try:
         while True:
             line = await process.stdout.readline()
@@ -315,13 +322,13 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
             logger.info("[%s] %s", task_id, text)
 
         await process.wait()
+        stderr = await stderr_task
 
         if process.returncode == 0:
             _task_status[task_id]["status"] = "completed"
             _task_status[task_id]["progress"] = "处理完成"
             logger.info("Pipeline 完成: %s", task_id)
         else:
-            stderr = await process.stderr.read()
             _task_status[task_id]["status"] = "failed"
             error_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "未知错误"
             _task_status[task_id]["error"] = error_msg
@@ -332,6 +339,8 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
         logger.error("Pipeline 异常 [%s]: %s", task_id, e)
     finally:
         _running_processes.pop(task_id, None)
+        # 清理摄像头帧目录（如果存在）
+        _cleanup_stream_dir(task_id)
 
 
 @router.get("/status", response_model=PipelineStatusResponse)
