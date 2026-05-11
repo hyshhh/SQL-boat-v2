@@ -206,7 +206,12 @@
         <span id="cameraStatusText">未启动</span>
       </div>
       <div id="cameraOutput" class="camera-output">
-        <video id="cameraStream" controls class="demo-video" autoplay muted></video>
+        <!-- MJPEG 实时流：用 img 标签接收 multipart/x-mixed-replace -->
+        <img id="cameraStream" class="demo-video" style="display:none;max-width:100%;border-radius:8px;background:#000" alt="摄像头实时画面" />
+        <div id="cameraStreamPlaceholder" class="video-placeholder">
+          <span>📷</span>
+          <p>启动后显示实时画面</p>
+        </div>
       </div>
     </div>
 
