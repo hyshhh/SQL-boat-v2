@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 
 from web.models import (
     ApiResponse,
@@ -23,16 +23,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ships", tags=["ships"])
 
+
 # ── 依赖注入 ──
 
-_service: ShipService | None = None
-
-
-def get_service() -> ShipService:
-    global _service
-    if _service is None:
-        _service = ShipService()
-    return _service
+def get_service(request: Request) -> ShipService:
+    """从 app.state 获取在 lifespan 中初始化的 ShipService 单例"""
+    return request.app.state.ship_service
 
 
 # ── 允许的文件类型 ──

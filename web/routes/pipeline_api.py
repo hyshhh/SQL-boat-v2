@@ -1,4 +1,4 @@
-"""Pipeline API 路由 — 视频上传、Demo 播放、摄像头流控制（修复版）"""
+"""Pipeline API 路由 — 视频上传、Demo 播放、摄像头流控制"""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 # ── 全局状态 ──
 _running_processes: dict[str, asyncio.subprocess.Process] = {}
 _task_status: dict[str, dict[str, Any]] = {}
-# 摄像头帧缓冲（用于 MJPEG 流）
 _camera_frames: dict[str, bytes] = {}
 
 
@@ -86,8 +85,10 @@ class PipelineStatusResponse(BaseModel):
 
 def _safe_filename(filename: str) -> str:
     """安全校验文件名，防止目录遍历"""
+    import re
     name = Path(filename).name
-    if not name or name.startswith('.') or '..' in name or '/' in name or '\\' in name:
+    name = re.sub(r'[^\w\-.]', '_', name)
+    if not name or name.startswith('.') or '..' in name:
         raise HTTPException(status_code=400, detail="无效的文件名")
     return name
 
@@ -133,7 +134,7 @@ async def list_videos():
 
 @router.post("/videos/upload")
 async def upload_video(file: UploadFile = File(...)):
-    """上传视频到 demovid 目录"""
+    """上传视频到 demovid 目录（流式写入，避免大文件撑爆内存）"""
     _ensure_dirs()
     cfg = _get_demo_config()
     max_size = cfg.get("max_file_size_mb", 500) * 1024 * 1024
@@ -147,10 +148,6 @@ async def upload_video(file: UploadFile = File(...)):
     if ext not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的视频格式: {ext}，支持: {', '.join(sorted(allowed))}")
 
-    contents = await file.read()
-    if len(contents) > max_size:
-        raise HTTPException(status_code=400, detail=f"文件过大，最大 {cfg.get('max_file_size_mb', 500)}MB")
-
     demo_dir = _get_demo_dir()
     save_path = demo_dir / filename
     if save_path.exists():
@@ -161,14 +158,30 @@ async def upload_video(file: UploadFile = File(...)):
             save_path = demo_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    save_path.write_bytes(contents)
-    logger.info("视频已上传: %s (%.2f MB)", save_path.name, len(contents) / (1024 * 1024))
+    # 流式写入，避免大文件全量读入内存
+    total_bytes = 0
+    chunk_size = 1024 * 1024  # 1MB
+    with open(save_path, "wb") as f:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > max_size:
+                save_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"文件过大，最大 {cfg.get('max_file_size_mb', 500)}MB",
+                )
+            f.write(chunk)
+
+    logger.info("视频已上传: %s (%.2f MB)", save_path.name, total_bytes / (1024 * 1024))
 
     return {
         "success": True,
         "message": f"视频已上传: {save_path.name}",
         "filename": save_path.name,
-        "size_mb": round(len(contents) / (1024 * 1024), 2),
+        "size_mb": round(total_bytes / (1024 * 1024), 2),
     }
 
 
@@ -196,15 +209,12 @@ async def start_pipeline(req: PipelineStartRequest):
     output_dir = _get_output_dir()
 
     if is_camera:
-        # ── 摄像头/RTSP 模式 ──
         video_source = req.video_filename
         if video_source.startswith("__camera__"):
-            # 提取摄像头编号
             cam_id = video_source.replace("__camera__", "")
             video_source = cam_id
         output_filename = f"camera_{task_id}.mp4"
     else:
-        # ── 文件模式 ──
         video_path = _get_video_path(req.video_filename)
         if video_path is None or not video_path.exists():
             raise HTTPException(status_code=404, detail=f"视频不存在: {req.video_filename}")
@@ -218,27 +228,20 @@ async def start_pipeline(req: PipelineStartRequest):
     config = load_config()
     pipeline_cfg = config.get("pipeline", {})
 
-    # TODO: 当 pipeline.cli 模块实现后取消注释
-    # cmd = ["python", "-m", "pipeline.cli", video_source, "--output", str(output_path)]
-    # if req.use_agent:
-    #     cmd.append("--agent")
-    # if req.concurrent_mode:
-    #     cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
-    # if req.display:
-    #     cmd.append("--display")
-    # if is_camera:
-    #     cmd.append("--camera")
-    # cmd.append("--demo")
-
-    # 临时：模拟 pipeline 命令（用于前端调试）
-    cmd = ["python", "-c", f"""
-import time, sys
-print("Pipeline 启动: {video_source}", flush=True)
-for i in range(10):
-    print(f"处理进度: {{(i+1)*10}}%", flush=True)
-    time.sleep(1)
-print("Pipeline 完成", flush=True)
-"""]
+    cmd = [
+        sys.executable, "-m", "pipeline",
+        video_source,
+        "--output", str(output_path),
+    ]
+    if req.use_agent:
+        cmd.append("--agent")
+    if req.concurrent_mode:
+        cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
+    if req.display:
+        cmd.append("--display")
+    if is_camera:
+        cmd.append("--camera")
+    cmd.append("--demo")
 
     logger.info("启动 Pipeline: %s (camera=%s)", " ".join(cmd), is_camera)
 
@@ -265,8 +268,8 @@ print("Pipeline 完成", flush=True)
 
     except FileNotFoundError:
         _task_status[task_id]["status"] = "failed"
-        _task_status[task_id]["error"] = "pipeline.cli 模块不存在，请确认 pipeline 目录已实现"
-        raise HTTPException(status_code=500, detail="pipeline.cli 模块不存在")
+        _task_status[task_id]["error"] = "pipeline 模块不存在，请确认 pipeline 目录已实现"
+        raise HTTPException(status_code=500, detail="pipeline 模块不存在")
 
     return PipelineStartResponse(
         success=True,
@@ -276,22 +279,35 @@ print("Pipeline 完成", flush=True)
     )
 
 
+import sys  # noqa: E402 — 用于 sys.executable
+
+
 async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str):
     """异步等待 pipeline 完成，实时解析进度"""
     try:
-        # 逐行读取 stdout 获取进度
         while True:
             line = await process.stdout.readline()
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
-            if text:
-                # 尝试解析进度信息
-                if "进度" in text or "progress" in text.lower() or "%" in text:
-                    _task_status[task_id]["progress"] = text
-                logger.info("[%s] %s", task_id, text)
+            if not text:
+                continue
 
-        # 等待进程结束
+            # 解析进度信息
+            if "进度" in text or "progress" in text.lower() or "%" in text or "处理帧" in text:
+                _task_status[task_id]["progress"] = text
+
+            # 解析最终摘要
+            if text.startswith("__PIPELINE_SUMMARY__:"):
+                try:
+                    import json
+                    summary = json.loads(text.replace("__PIPELINE_SUMMARY__:", ""))
+                    _task_status[task_id]["summary"] = summary
+                except Exception:
+                    pass
+
+            logger.info("[%s] %s", task_id, text)
+
         await process.wait()
 
         if process.returncode == 0:
@@ -375,24 +391,13 @@ async def get_output_video(filename: str):
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
 
-    # 根据实际文件扩展名设置 MIME 类型
     ext = video_path.suffix.lower()
     mime_map = {
-        ".mp4": "video/mp4",
-        ".avi": "video/x-msvideo",
-        ".mkv": "video/x-matroska",
-        ".mov": "video/quicktime",
-        ".flv": "video/x-flv",
-        ".wmv": "video/x-ms-wmv",
-        ".webm": "video/webm",
+        ".mp4": "video/mp4", ".avi": "video/x-msvideo",
+        ".mkv": "video/x-matroska", ".mov": "video/quicktime",
+        ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".webm": "video/webm",
     }
-    mime = mime_map.get(ext, "video/mp4")
-
-    return FileResponse(
-        path=str(video_path),
-        media_type=mime,
-        filename=filename,
-    )
+    return FileResponse(path=str(video_path), media_type=mime_map.get(ext, "video/mp4"), filename=filename)
 
 
 @router.get("/video/{filename}")
@@ -406,21 +411,11 @@ async def get_source_video(filename: str):
 
     ext = video_path.suffix.lower()
     mime_map = {
-        ".mp4": "video/mp4",
-        ".avi": "video/x-msvideo",
-        ".mkv": "video/x-matroska",
-        ".mov": "video/quicktime",
-        ".flv": "video/x-flv",
-        ".wmv": "video/x-ms-wmv",
-        ".webm": "video/webm",
+        ".mp4": "video/mp4", ".avi": "video/x-msvideo",
+        ".mkv": "video/x-matroska", ".mov": "video/quicktime",
+        ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".webm": "video/webm",
     }
-    mime = mime_map.get(ext, "video/mp4")
-
-    return FileResponse(
-        path=str(video_path),
-        media_type=mime,
-        filename=filename,
-    )
+    return FileResponse(path=str(video_path), media_type=mime_map.get(ext, "video/mp4"), filename=filename)
 
 
 # ── 摄像头 MJPEG 流 ──
@@ -432,7 +427,6 @@ async def camera_stream(task_id: str):
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
     async def generate():
-        """生成 MJPEG 帧流"""
         boundary = "--frame"
         while task_id in _task_status and _task_status[task_id]["status"] == "running":
             frame = _camera_frames.get(task_id)
@@ -442,13 +436,12 @@ async def camera_stream(task_id: str):
                     f"Content-Type: image/jpeg\r\n\r\n"
                 ).encode() + frame + b"\r\n"
             else:
-                # 没有帧时发送占位
                 yield (
                     f"{boundary}\r\n"
                     f"Content-Type: text/plain\r\n\r\n"
                     f"等待帧数据...\r\n"
                 ).encode()
-            await asyncio.sleep(0.05)  # ~20fps
+            await asyncio.sleep(0.05)
 
     return StreamingResponse(
         generate(),

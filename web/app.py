@@ -23,14 +23,14 @@ from web.services import ShipService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化数据库"""
+    """应用生命周期：启动时初始化数据库，挂载到 app.state"""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
     logging.getLogger(__name__).info("Web 服务启动，初始化数据库…")
-    # 预热服务（触发数据库加载）
-    ShipService()
+    config = load_config()
+    app.state.ship_service = ShipService(config=config)
     yield
     logging.getLogger(__name__).info("Web 服务关闭")
 

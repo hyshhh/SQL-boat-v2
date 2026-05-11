@@ -25,3 +25,15 @@ class ShipDataSource(ABC):
 
     @abstractmethod
     def count(self) -> int: ...
+
+    @abstractmethod
+    def bulk_add(self, ships: dict[str, str]) -> int: ...
+
+    def search_by_description(self, keyword: str) -> list[dict]:
+        """按描述关键词搜索（默认实现：内存过滤子串匹配）"""
+        data = self.load_all()
+        return [
+            {"hull_number": hn, "description": desc}
+            for hn, desc in data.items()
+            if keyword.lower() in desc.lower()
+        ]
