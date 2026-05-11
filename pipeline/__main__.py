@@ -38,6 +38,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--conf", type=float, default=0.25, help="检测置信度")
     p.add_argument("--detect-every", type=int, default=1, help="每隔 N 帧检测一次")
     p.add_argument("--camera", action="store_true", help="摄像头模式")
+    p.add_argument("--frames-dir", default=None,
+                   help="帧目录模式：从指定目录读取 latest.jpg（浏览器摄像头推流）")
+    p.add_argument("--virtual-fps", type=float, default=15.0,
+                   help="帧目录模式的虚拟帧率 (默认 15)")
     p.add_argument("--stream-dir", default=None,
                    help="将每帧标注结果以 latest.jpg 写入此目录（供 MJPEG 流读取）")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -101,7 +105,17 @@ def run_pipeline(args: argparse.Namespace) -> int:
     model = YOLO(yolo_model_path)
 
     # ── 打开视频源 ──
-    if is_camera:
+    if args.frames_dir:
+        # 帧目录模式（浏览器摄像头）
+        from pipeline.virtual_camera import VirtualCamera
+        frames_path = Path(args.frames_dir)
+        if not frames_path.exists():
+            logger.error("帧目录不存在: %s", frames_path)
+            return 1
+        cap = VirtualCamera(frames_path, fps=args.virtual_fps)
+        is_camera = True
+        logger.info("使用帧目录模式: %s (虚拟FPS=%.1f)", frames_path, args.virtual_fps)
+    elif is_camera:
         cam_id = int(source) if source.isdigit() else source
         cap = cv2.VideoCapture(cam_id)
     else:

@@ -453,6 +453,20 @@ tbody tr:hover { background: #f8f9fb; }
   margin-top: 16px;
 }
 
+/* ── 浏览器摄像头预览 ── */
+.camera-preview-wrap {
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  max-width: 480px;
+}
+.camera-preview-wrap video {
+  width: 100%;
+  display: block;
+  border-radius: 8px;
+  background: #111;
+}
+
 /* ── 帮助内容 ── */
 .help-content {
   font-size: 14px;

@@ -373,18 +373,30 @@ async function stopTaskById(taskId) {
 
 let cameraTaskId = null;
 let cameraPollTimer = null;
+let browserCameraStream = null;   // MediaStream
+let browserCameraWs = null;       // WebSocket
+let browserCameraTimer = null;    // 帧捕获定时器
+let browserCameraCanvas = null;   // 离屏 canvas
 
 function onCameraSourceChange() {
   const sel = document.getElementById('cameraSource');
   if (!sel) return;
   const val = sel.value;
   const urlInput = document.getElementById('cameraUrl');
-  if (!urlInput) return;
-  urlInput.style.display = val === '0' ? 'none' : '';
-  if (val === 'rtsp') {
-    urlInput.placeholder = 'rtsp://192.168.1.100/stream';
-  } else if (val === 'custom') {
-    urlInput.placeholder = '输入视频路径或 URL';
+  const previewRow = document.getElementById('browserCameraPreviewRow');
+
+  if (urlInput) {
+    urlInput.style.display = (val === '0' || val === 'browser') ? 'none' : '';
+    if (val === 'rtsp') {
+      urlInput.placeholder = 'rtsp://192.168.1.100/stream';
+    } else if (val === 'custom') {
+      urlInput.placeholder = '输入视频路径或 URL';
+    }
+  }
+
+  // 显示/隐藏浏览器预览
+  if (previewRow) {
+    previewRow.style.display = val === 'browser' ? '' : 'none';
   }
 }
 
@@ -392,12 +404,172 @@ function getCameraInput() {
   const sel = document.getElementById('cameraSource');
   if (!sel) return '';
   if (sel.value === '0') return '0';
+  if (sel.value === 'browser') return '__browser__';
   const urlInput = document.getElementById('cameraUrl');
   return urlInput ? urlInput.value.trim() : '';
 }
 
+// ── 浏览器摄像头：启动 ──
+async function startBrowserCamera() {
+  const btn = document.getElementById('btnStartCamera');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
+
+  try {
+    // 1. 获取浏览器摄像头
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' },
+      audio: false,
+    });
+    browserCameraStream = stream;
+
+    // 显示本地预览
+    const preview = document.getElementById('browserCameraPreview');
+    const placeholder = document.getElementById('browserCameraPreviewPlaceholder');
+    if (preview) {
+      preview.srcObject = stream;
+      preview.style.display = '';
+    }
+    if (placeholder) placeholder.style.display = 'none';
+
+    // 2. 启动后端 Pipeline
+    const resp = await fetch(`${PIPE_API}/start-browser-camera`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        use_agent: document.getElementById('camOptAgent').checked,
+        concurrent_mode: document.getElementById('camOptConcurrent').checked,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '启动失败');
+
+    cameraTaskId = data.task_id;
+
+    // 3. 建立 WebSocket 推流
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
+    const ws = new WebSocket(wsUrl);
+    browserCameraWs = ws;
+
+    ws.onopen = () => {
+      showToast('摄像头已连接，开始推流');
+      document.getElementById('cameraStatusCard').style.display = '';
+      updateCameraStatus('running', '浏览器摄像头推流中...');
+      document.getElementById('btnStartCamera').style.display = 'none';
+      document.getElementById('btnStopCamera').style.display = '';
+
+      // 设置 MJPEG 实时流画面
+      const cameraStream = document.getElementById('cameraStream');
+      const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
+      if (cameraStream) {
+        cameraStream.src = `${PIPE_API}/stream/${cameraTaskId}`;
+        cameraStream.style.display = '';
+        if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
+      }
+
+      // 开始捕获帧
+      startFrameCapture(ws, stream);
+      startCameraPolling();
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (!msg.ok) console.warn('帧发送失败:', msg.error);
+      } catch {}
+    };
+
+    ws.onerror = () => {
+      showToast('WebSocket 连接错误', 'error');
+      stopBrowserCamera();
+    };
+
+    ws.onclose = () => {
+      if (cameraTaskId) {
+        showToast('WebSocket 已断开');
+        stopBrowserCamera();
+      }
+    };
+
+  } catch (e) {
+    showToast('启动失败: ' + e.message, 'error');
+    stopBrowserCamera();
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '▶ 启动摄像头识别';
+  }
+}
+
+function startFrameCapture(ws, stream) {
+  // 创建离屏 canvas
+  const video = document.getElementById('browserCameraPreview');
+  if (!video) return;
+
+  // 等视频就绪
+  const doCapture = () => {
+    if (!browserCameraCanvas) {
+      browserCameraCanvas = document.createElement('canvas');
+    }
+    const canvas = browserCameraCanvas;
+    const targetW = 1280;
+    const targetH = 720;
+
+    browserCameraTimer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+
+      // 从 video 元素捕获帧
+      canvas.width = video.videoWidth || targetW;
+      canvas.height = video.videoHeight || targetH;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      canvas.toBlob((blob) => {
+        if (!blob || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(blob);
+      }, 'image/jpeg', 0.7);
+    }, 66); // ~15fps
+  };
+
+  if (video.readyState >= 2) {
+    doCapture();
+  } else {
+    video.addEventListener('loadeddata', doCapture, { once: true });
+  }
+}
+
+function stopFrameCapture() {
+  if (browserCameraTimer) {
+    clearInterval(browserCameraTimer);
+    browserCameraTimer = null;
+  }
+  if (browserCameraWs) {
+    browserCameraWs.close();
+    browserCameraWs = null;
+  }
+  if (browserCameraStream) {
+    browserCameraStream.getTracks().forEach(t => t.stop());
+    browserCameraStream = null;
+  }
+  const preview = document.getElementById('browserCameraPreview');
+  if (preview) {
+    preview.srcObject = null;
+    preview.style.display = 'none';
+  }
+  const placeholder = document.getElementById('browserCameraPreviewPlaceholder');
+  if (placeholder) placeholder.style.display = '';
+  browserCameraCanvas = null;
+}
+
 async function startCameraPipeline() {
   const input = getCameraInput();
+
+  // 浏览器摄像头走独立流程
+  if (input === '__browser__') {
+    await startBrowserCamera();
+    return;
+  }
+
   if (!input) { showToast('请输入摄像头地址', 'error'); return; }
 
   const btn = document.getElementById('btnStartCamera');
@@ -454,26 +626,29 @@ async function startCameraPipeline() {
 }
 
 async function stopCameraPipeline() {
-  if (!cameraTaskId) return;
-  try {
-    await fetch(`${PIPE_API}/stop/${cameraTaskId}`, { method: 'POST' });
-    updateCameraStatus('idle', '已停止');
-    resetCameraButtons();
-    stopCameraPolling();
+  // 停止浏览器摄像头推流
+  stopFrameCapture();
 
-    // 清除实时流
-    const cameraStream = document.getElementById('cameraStream');
-    const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
-    if (cameraStream) {
-      cameraStream.src = '';
-      cameraStream.style.display = 'none';
-      if (cameraPlaceholder) cameraPlaceholder.style.display = '';
-    }
-
-    showToast('摄像头已停止');
-  } catch (e) {
-    showToast(e.message, 'error');
+  if (cameraTaskId) {
+    try {
+      await fetch(`${PIPE_API}/stop/${cameraTaskId}`, { method: 'POST' });
+    } catch {}
   }
+  updateCameraStatus('idle', '已停止');
+  resetCameraButtons();
+  stopCameraPolling();
+
+  // 清除实时流
+  const cameraStream = document.getElementById('cameraStream');
+  const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
+  if (cameraStream) {
+    cameraStream.src = '';
+    cameraStream.style.display = 'none';
+    if (cameraPlaceholder) cameraPlaceholder.style.display = '';
+  }
+
+  cameraTaskId = null;
+  showToast('摄像头已停止');
 }
 
 function startCameraPolling() {

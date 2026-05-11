@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -63,6 +63,11 @@ class PipelineStartRequest(BaseModel):
     use_agent: bool = False
     concurrent_mode: bool = True
     display: bool = False
+
+
+class BrowserCameraStartRequest(BaseModel):
+    use_agent: bool = False
+    concurrent_mode: bool = True
 
 
 class PipelineStartResponse(BaseModel):
@@ -385,6 +390,17 @@ def _cleanup_stream_dir(task_id: str):
     d = Path("./_camera_frames") / task_id
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+    # 同时清理浏览器帧目录
+    d2 = Path("./_browser_frames") / task_id
+    if d2.exists():
+        shutil.rmtree(d2, ignore_errors=True)
+
+
+def _get_browser_frames_dir(task_id: str) -> Path:
+    """获取浏览器摄像头帧目录"""
+    d = Path("./_browser_frames") / task_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ── 摄像头 MJPEG 流 ──
@@ -428,6 +444,117 @@ async def camera_stream(task_id: str):
         generate(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+# ── 浏览器摄像头 ──
+
+@router.post("/start-browser-camera", response_model=PipelineStartResponse)
+async def start_browser_camera(req: BrowserCameraStartRequest):
+    """启动浏览器摄像头 Pipeline（等待 WebSocket 推流）"""
+    _ensure_dirs()
+    config = load_config()
+    pipeline_cfg = config.get("pipeline", {})
+
+    task_id = str(uuid.uuid4())[:8]
+    output_dir = _get_output_dir()
+    output_filename = f"browser_cam_{task_id}.mp4"
+    output_path = output_dir / output_filename
+    frames_dir = _get_browser_frames_dir(task_id)
+    stream_dir = _get_stream_dir(task_id)
+
+    cmd = [
+        sys.executable, "-m", "pipeline",
+        f"browser_camera_{task_id}",
+        "--frames-dir", str(frames_dir),
+        "--virtual-fps", "15",
+        "--output", str(output_path),
+        "--stream-dir", str(stream_dir),
+        "--camera",
+        "--demo",
+    ]
+    if req.use_agent:
+        cmd.append("--agent")
+    if req.concurrent_mode:
+        cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
+
+    logger.info("启动浏览器摄像头 Pipeline: %s", " ".join(cmd))
+
+    _task_status[task_id] = {
+        "task_id": task_id,
+        "status": "running",
+        "video_filename": f"浏览器摄像头 ({task_id})",
+        "output_filename": output_filename,
+        "output_path": str(output_path),
+        "progress": "等待摄像头连接...",
+        "error": None,
+        "is_camera": True,
+        "is_browser_camera": True,
+    }
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(Path.cwd()),
+        )
+        _running_processes[task_id] = process
+        asyncio.create_task(_wait_pipeline(task_id, process, output_filename))
+    except FileNotFoundError:
+        _task_status[task_id]["status"] = "failed"
+        _task_status[task_id]["error"] = "pipeline 模块不存在"
+        raise HTTPException(status_code=500, detail="pipeline 模块不存在")
+
+    return PipelineStartResponse(
+        success=True,
+        message=f"浏览器摄像头 Pipeline 已启动，请连接 WebSocket 推流",
+        task_id=task_id,
+        output_filename=output_filename,
+    )
+
+
+@router.websocket("/ws/camera/{task_id}")
+async def browser_camera_ws(websocket: WebSocket, task_id: str):
+    """WebSocket 端点 — 接收浏览器摄像头 JPEG 帧"""
+    if task_id not in _task_status:
+        await websocket.close(code=4004, reason="任务不存在")
+        return
+
+    frames_dir = _get_browser_frames_dir(task_id)
+    await websocket.accept()
+    logger.info("浏览器摄像头 WebSocket 已连接: %s", task_id)
+
+    _task_status[task_id]["progress"] = "摄像头已连接，推流中..."
+
+    frame_count = 0
+    try:
+        while _task_status.get(task_id, {}).get("status") == "running":
+            data = await websocket.receive_bytes()
+
+            # 验证 JPEG 魔数
+            if len(data) < 3 or data[:2] != b'\xff\xd8':
+                await websocket.send_json({"ok": False, "error": "非 JPEG 数据"})
+                continue
+
+            # 原子写入
+            frame_path = frames_dir / "latest.jpg"
+            tmp_path = frames_dir / "latest.jpg.tmp"
+            tmp_path.write_bytes(data)
+            tmp_path.rename(frame_path)
+
+            frame_count += 1
+            if frame_count % 30 == 0:
+                logger.debug("浏览器摄像头帧计数: %d", frame_count)
+
+            await websocket.send_json({"ok": True, "frame": frame_count})
+
+    except WebSocketDisconnect:
+        logger.info("浏览器摄像头 WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
+    except Exception as e:
+        logger.error("浏览器摄像头 WebSocket 异常: %s", e)
+    finally:
+        if task_id in _task_status and _task_status[task_id]["status"] == "running":
+            _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧）"
 
 
 # ── 结果视频 ──

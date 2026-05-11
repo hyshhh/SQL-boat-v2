@@ -170,13 +170,27 @@
           <label>输入源</label>
           <div class="input-group">
             <select id="cameraSource" onchange="onCameraSourceChange()">
-              <option value="0">本地摄像头 (0)</option>
+              <option value="browser">本地摄像头（浏览器）</option>
+              <option value="0">服务器摄像头 (0)</option>
               <option value="rtsp">RTSP 流</option>
               <option value="custom">自定义</option>
             </select>
             <input type="text" id="cameraUrl" placeholder="rtsp://192.168.1.100/stream" style="display:none" />
           </div>
         </div>
+
+        <!-- 浏览器摄像头预览 -->
+        <div class="form-row" id="browserCameraPreviewRow">
+          <label>摄像头预览</label>
+          <div class="camera-preview-wrap">
+            <video id="browserCameraPreview" autoplay playsinline muted></video>
+            <div id="browserCameraPreviewPlaceholder" class="video-placeholder" style="min-height:200px">
+              <span>📷</span>
+              <p>点击"启动"后授权摄像头</p>
+            </div>
+          </div>
+        </div>
+
         <div class="form-row">
           <label>处理选项</label>
           <div class="pipeline-options">
