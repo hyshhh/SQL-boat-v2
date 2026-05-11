@@ -416,7 +416,10 @@ async function startBrowserCamera() {
   btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
 
   try {
-    // 1. 获取浏览器摄像头
+    // 1. 获取浏览器摄像头（需要 HTTPS 或 localhost）
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('当前页面不是安全上下文（需要 HTTPS 或 localhost），浏览器不允许访问摄像头');
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' },
       audio: false,
