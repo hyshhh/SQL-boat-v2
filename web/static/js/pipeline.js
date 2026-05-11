@@ -177,6 +177,8 @@ function playSourceVideo(filename) {
   if (!video) return;
   video.src = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
   video.load();
+  // 确保 pipelineControl 可见
+  document.getElementById('pipelineControl').style.display = '';
 }
 
 async function deleteVideo(filename) {
