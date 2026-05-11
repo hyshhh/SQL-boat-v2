@@ -135,17 +135,20 @@ def run_pipeline(args: argparse.Namespace) -> int:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not is_camera else 0
 
-    logger.info("视频源: %s | 分辨率: %dx%d | FPS: %.1f | 总帧数: %s",
-                source, width, height, fps, total_frames if total_frames else "未知(实时)")
+    if width > 0 and height > 0:
+        logger.info("视频源: %s | 分辨率: %dx%d | FPS: %.1f | 总帧数: %s",
+                    source, width, height, fps, total_frames if total_frames else "未知(实时)")
+    else:
+        logger.info("视频源: %s | 分辨率: 等待首帧 | FPS: %.1f | 总帧数: 未知(实时)", source, fps)
 
-    # ── 输出视频 ──
+    # ── 输出视频（延迟创建，等第一帧确定尺寸）──
     writer = None
+    writer_path = None
+    writer_fps = fps
     if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
-        logger.info("输出视频: %s", out_path)
+        writer_path = Path(args.output)
+        writer_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("输出视频: %s (延迟创建，等第一帧)", writer_path)
 
     # ── MJPEG 帧输出目录 ──
     stream_dir: Path | None = None
@@ -232,6 +235,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
             frame_idx += 1
             if max_frames > 0 and frame_idx > max_frames:
                 break
+
+            # ── 延迟创建 VideoWriter（第一帧到达后才能确定尺寸）──
+            if writer_path and writer is None:
+                h, w = frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(str(writer_path), fourcc, writer_fps, (w, h))
+                logger.info("VideoWriter 已创建: %dx%d", w, h)
 
             annotated = frame.copy() if (args.demo or stream_dir) else None
 

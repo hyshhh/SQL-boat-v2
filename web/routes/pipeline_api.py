@@ -536,11 +536,15 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
                 await websocket.send_json({"ok": False, "error": "非 JPEG 数据"})
                 continue
 
-            # 原子写入
+            # 原子写入（用 asyncio.to_thread 避免阻塞事件循环）
             frame_path = frames_dir / "latest.jpg"
             tmp_path = frames_dir / "latest.jpg.tmp"
-            tmp_path.write_bytes(data)
-            tmp_path.rename(frame_path)
+
+            def _write_frame():
+                tmp_path.write_bytes(data)
+                tmp_path.rename(frame_path)
+
+            await asyncio.to_thread(_write_frame)
 
             frame_count += 1
             if frame_count % 30 == 0:
@@ -553,8 +557,16 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
     except Exception as e:
         logger.error("浏览器摄像头 WebSocket 异常: %s", e)
     finally:
+        # WebSocket 断开 → 终止对应的 pipeline
+        logger.info("浏览器摄像头推流结束，终止 pipeline: %s", task_id)
         if task_id in _task_status and _task_status[task_id]["status"] == "running":
             _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧）"
+        # 主动终止 pipeline 进程（避免僵尸循环）
+        if task_id in _running_processes:
+            try:
+                _running_processes[task_id].terminate()
+            except Exception:
+                pass
 
 
 # ── 结果视频 ──

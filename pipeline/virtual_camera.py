@@ -48,6 +48,11 @@ class VirtualCamera:
         if elapsed < self._frame_interval:
             time.sleep(self._frame_interval - elapsed)
 
+        # 检查帧目录是否还存在（WebSocket 断开后可能被清理）
+        if not self._dir.exists():
+            self._opened = False
+            return False, None
+
         frame_path = self._dir / "latest.jpg"
         if not frame_path.exists():
             # 帧还没到，返回上一帧（如果有）
