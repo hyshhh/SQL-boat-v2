@@ -516,15 +516,15 @@ async function startBrowserCamera() {
     };
 
     ws.onerror = () => {
-      showToast('WebSocket 连接错误', 'error');
-      stopBrowserCamera();
+      console.warn('WebSocket 错误');
     };
 
-    ws.onclose = () => {
-      if (cameraTaskId) {
-        showToast('WebSocket 已断开');
-        stopBrowserCamera();
-      }
+    ws.onclose = (evt) => {
+      // 正常停止（用户点了停止）时不报错
+      if (!cameraTaskId) return;
+      console.warn('WebSocket 断开, code:', evt.code);
+      // 不立即停止，让状态轮询来判断 pipeline 是否还在运行
+      // 如果 pipeline 已经停了，pollCameraStatus 会处理
     };
 
   } catch (e) {
@@ -537,31 +537,31 @@ async function startBrowserCamera() {
 }
 
 function startFrameCapture(ws, stream) {
-  // 创建离屏 canvas
   const video = document.getElementById('browserCameraPreview');
   if (!video) return;
 
-  // 等视频就绪
+  let sending = false;  // 防止 toBlob 重入
+
   const doCapture = () => {
     if (!browserCameraCanvas) {
       browserCameraCanvas = document.createElement('canvas');
     }
     const canvas = browserCameraCanvas;
-    const targetW = 1280;
-    const targetH = 720;
 
     browserCameraTimer = setInterval(() => {
-      if (ws.readyState !== WebSocket.OPEN) return;
+      if (ws.readyState !== WebSocket.OPEN || sending) return;
 
-      // 从 video 元素捕获帧
-      canvas.width = video.videoWidth || targetW;
-      canvas.height = video.videoHeight || targetH;
+      sending = true;
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       canvas.toBlob((blob) => {
-        if (!blob || ws.readyState !== WebSocket.OPEN) return;
-        ws.send(blob);
+        if (blob && ws.readyState === WebSocket.OPEN) {
+          ws.send(blob);
+        }
+        sending = false;
       }, 'image/jpeg', 0.7);
     }, 66); // ~15fps
   };

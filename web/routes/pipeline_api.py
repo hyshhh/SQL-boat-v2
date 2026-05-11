@@ -431,6 +431,25 @@ def _cleanup_stream_dir(task_id: str):
         shutil.rmtree(d2, ignore_errors=True)
 
 
+async def _delayed_cleanup(task_id: str, delay: int = 10):
+    """延迟清理：等待 pipeline 自然结束后再清理目录"""
+    await asyncio.sleep(delay)
+    # 如果 pipeline 还在运行，终止它
+    if task_id in _running_processes:
+        try:
+            _running_processes[task_id].terminate()
+            await asyncio.wait_for(_running_processes[task_id].wait(), timeout=5)
+        except Exception:
+            pass
+        _running_processes.pop(task_id, None)
+    # 更新状态
+    if task_id in _task_status and _task_status[task_id]["status"] == "running":
+        _task_status[task_id]["status"] = "completed"
+        _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
+    # 清理帧目录
+    _cleanup_stream_dir(task_id)
+
+
 def _get_browser_frames_dir(task_id: str) -> Path:
     """获取浏览器摄像头帧目录"""
     d = Path("./_browser_frames") / task_id
@@ -584,24 +603,24 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
             frame_count += 1
             if frame_count % 30 == 0:
                 logger.debug("浏览器摄像头帧计数: %d", frame_count)
-
-            await websocket.send_json({"ok": True, "frame": frame_count})
+                # 每 30 帧发一次 ack（减少网络开销）
+                try:
+                    await websocket.send_json({"ok": True, "frame": frame_count})
+                except Exception:
+                    pass
 
     except WebSocketDisconnect:
         logger.info("浏览器摄像头 WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
     except Exception as e:
         logger.error("浏览器摄像头 WebSocket 异常: %s", e)
     finally:
-        # WebSocket 断开 → 终止对应的 pipeline
-        logger.info("浏览器摄像头推流结束，终止 pipeline: %s", task_id)
+        # WebSocket 断开 → 标记断开，但不立即终止 pipeline
+        # pipeline 会因帧目录被删/无新帧而自动退出
+        logger.info("浏览器摄像头推流结束: %s (共 %d 帧)", task_id, frame_count)
         if task_id in _task_status and _task_status[task_id]["status"] == "running":
-            _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧）"
-        # 主动终止 pipeline 进程（避免僵尸循环）
-        if task_id in _running_processes:
-            try:
-                _running_processes[task_id].terminate()
-            except Exception:
-                pass
+            _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧），等待 pipeline 结束..."
+        # 延迟清理：给 pipeline 时间写完输出视频
+        asyncio.create_task(_delayed_cleanup(task_id, delay=10))
 
 
 # ── 结果视频 ──
