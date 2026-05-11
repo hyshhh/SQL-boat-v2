@@ -287,7 +287,9 @@ async def start_pipeline(req: PipelineStartRequest):
         stream_dir = _get_stream_dir(task_id)
         cmd.extend(["--stream-dir", str(stream_dir)])
     else:
-        # 文件模式：仅在用户明确要求时传 --display
+        # 文件模式：实时预览 + 输出视频
+        stream_dir = _get_stream_dir(task_id)
+        cmd.extend(["--stream-dir", str(stream_dir)])
         if req.display:
             cmd.append("--display")
     cmd.append("--demo")

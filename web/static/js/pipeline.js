@@ -223,6 +223,18 @@ async function startVideoPipeline() {
     document.getElementById('btnStartPipeline').style.display = 'none';
     document.getElementById('btnStopPipeline').style.display = '';
 
+    // 实时预览：显示 MJPEG 流
+    const resultVideo = document.getElementById('resultVideo');
+    const resultPlaceholder = document.getElementById('resultPlaceholder');
+    if (resultVideo) {
+      resultVideo.style.display = 'none';
+    }
+    // 复用 resultPlaceholder 区域显示实时流
+    if (resultPlaceholder) {
+      resultPlaceholder.innerHTML = `<img id="livePreview" src="${PIPE_API}/stream/${currentTaskId}" style="max-width:100%;border-radius:8px;background:#000" alt="实时预览" />`;
+      resultPlaceholder.style.display = '';
+    }
+
     startStatusPolling();
   } catch (e) {
     showToast('启动失败: ' + e.message, 'error');
@@ -240,6 +252,11 @@ async function stopVideoPipeline() {
     if (!resp.ok) throw new Error(data.detail || '停止失败');
     showToast('已停止');
     updatePipelineStatus('failed', '已停止');
+    // 清除实时预览
+    const resultPlaceholder = document.getElementById('resultPlaceholder');
+    if (resultPlaceholder) {
+      resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+    }
     resetPipelineButtons();
     stopStatusPolling();
   } catch (e) {
@@ -270,17 +287,27 @@ async function pollTaskStatus() {
       stopStatusPolling();
       resetPipelineButtons();
       showToast('✅ 处理完成!');
+      // 清除实时预览
+      const resultPlaceholder = document.getElementById('resultPlaceholder');
+      if (resultPlaceholder) {
+        resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+      }
       if (data.output_filename) {
         const resultVideo = document.getElementById('resultVideo');
         resultVideo.src = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
         resultVideo.style.display = '';
-        document.getElementById('resultPlaceholder').style.display = 'none';
+        if (resultPlaceholder) resultPlaceholder.style.display = 'none';
         resultVideo.load();
       }
       loadTaskHistory();
     } else if (data.status === 'failed') {
       stopStatusPolling();
       resetPipelineButtons();
+      // 清除实时预览
+      const resultPlaceholder = document.getElementById('resultPlaceholder');
+      if (resultPlaceholder) {
+        resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+      }
       showToast('处理失败: ' + (data.error || '未知错误'), 'error');
       loadTaskHistory();
     }
