@@ -36,7 +36,7 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/bmp", "image/webp", "im
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 
-# ── CRUD ──
+# ── 固定路径路由（必须在 {hull_number} 之前注册，否则会被参数路由吞掉）──
 
 @router.get("", response_model=ShipListResponse)
 async def list_ships(svc: Annotated[ShipService, Depends(get_service)]):
@@ -44,59 +44,6 @@ async def list_ships(svc: Annotated[ShipService, Depends(get_service)]):
     ships = svc.list_ships()
     return ShipListResponse(total=len(ships), ships=[ShipItem(**s) for s in ships])
 
-
-@router.get("/{hull_number}", response_model=ShipItem)
-async def get_ship(hull_number: str, svc: Annotated[ShipService, Depends(get_service)]):
-    """查询单条船只"""
-    ship = svc.get_ship(hull_number)
-    if ship is None:
-        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
-    return ShipItem(**ship)
-
-
-@router.post("", response_model=ApiResponse)
-async def create_ship(body: ShipCreate, svc: Annotated[ShipService, Depends(get_service)]):
-    """新增船只"""
-    success = svc.create_ship(body.hull_number, body.description)
-    if not success:
-        raise HTTPException(status_code=409, detail=f"弦号已存在: {body.hull_number}")
-    return ApiResponse(success=True, message=f"成功添加弦号: {body.hull_number}")
-
-
-@router.put("/{hull_number}", response_model=ApiResponse)
-async def update_ship(
-    hull_number: str,
-    body: ShipUpdate,
-    svc: Annotated[ShipService, Depends(get_service)],
-):
-    """更新船只描述"""
-    success = svc.update_ship(hull_number, body.description)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
-    return ApiResponse(success=True, message=f"成功更新弦号: {hull_number}")
-
-
-@router.delete("/{hull_number}", response_model=ApiResponse)
-async def delete_ship(hull_number: str, svc: Annotated[ShipService, Depends(get_service)]):
-    """删除船只"""
-    success = svc.delete_ship(hull_number)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
-    return ApiResponse(success=True, message=f"成功删除弦号: {hull_number}")
-
-
-@router.post("/bulk", response_model=ApiResponse)
-async def bulk_create(body: ShipBulkCreate, svc: Annotated[ShipService, Depends(get_service)]):
-    """批量添加船只"""
-    result = svc.bulk_create(body.ships)
-    return ApiResponse(
-        success=True,
-        message=f"成功添加 {result['added']} 条（跳过 {result['skipped']} 条已存在的）",
-        data=result,
-    )
-
-
-# ── 搜索 ──
 
 @router.get("/search", response_model=SearchResponse)
 async def search_ships(
@@ -110,8 +57,6 @@ async def search_ships(
     return SearchResponse(total=len(results), results=[ShipItem(**r) for r in results])
 
 
-# ── 统计 ──
-
 @router.get("/stats", response_model=StatsResponse)
 async def stats(svc: Annotated[ShipService, Depends(get_service)]):
     """数据库统计信息"""
@@ -119,7 +64,25 @@ async def stats(svc: Annotated[ShipService, Depends(get_service)]):
     return StatsResponse(total_ships=info["total_ships"], backend=info["backend"])
 
 
-# ── VLM 识别 ──
+@router.post("", response_model=ApiResponse)
+async def create_ship(body: ShipCreate, svc: Annotated[ShipService, Depends(get_service)]):
+    """新增船只"""
+    success = svc.create_ship(body.hull_number, body.description)
+    if not success:
+        raise HTTPException(status_code=409, detail=f"弦号已存在: {body.hull_number}")
+    return ApiResponse(success=True, message=f"成功添加弦号: {body.hull_number}")
+
+
+@router.post("/bulk", response_model=ApiResponse)
+async def bulk_create(body: ShipBulkCreate, svc: Annotated[ShipService, Depends(get_service)]):
+    """批量添加船只"""
+    result = svc.bulk_create(body.ships)
+    return ApiResponse(
+        success=True,
+        message=f"成功添加 {result['added']} 条（跳过 {result['skipped']} 条已存在的）",
+        data=result,
+    )
+
 
 @router.post("/recognize", response_model=ApiResponse)
 async def recognize_ship(
@@ -162,3 +125,36 @@ async def recognize_and_add(
     hn = result["hull_number"]
     msg = f"弦号 {hn} 已存在，已更新描述" if action == "updated" else f"成功添加弦号: {hn}"
     return ApiResponse(success=True, message=msg, data=result)
+
+
+# ── 参数路由（放在固定路径之后）──
+
+@router.get("/{hull_number}", response_model=ShipItem)
+async def get_ship(hull_number: str, svc: Annotated[ShipService, Depends(get_service)]):
+    """查询单条船只"""
+    ship = svc.get_ship(hull_number)
+    if ship is None:
+        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
+    return ShipItem(**ship)
+
+
+@router.put("/{hull_number}", response_model=ApiResponse)
+async def update_ship(
+    hull_number: str,
+    body: ShipUpdate,
+    svc: Annotated[ShipService, Depends(get_service)],
+):
+    """更新船只描述"""
+    success = svc.update_ship(hull_number, body.description)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
+    return ApiResponse(success=True, message=f"成功更新弦号: {hull_number}")
+
+
+@router.delete("/{hull_number}", response_model=ApiResponse)
+async def delete_ship(hull_number: str, svc: Annotated[ShipService, Depends(get_service)]):
+    """删除船只"""
+    success = svc.delete_ship(hull_number)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"未找到弦号: {hull_number}")
+    return ApiResponse(success=True, message=f"成功删除弦号: {hull_number}")
