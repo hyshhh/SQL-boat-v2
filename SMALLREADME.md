@@ -18,12 +18,15 @@ uvicorn web.app:app --host 0.0.0.0 --port 8000 --reload
 ### LLM 推理（Qwen3-VL）
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 vllm serve /path/to/Qwen3.5-2B-AWQ \
+CUDA_VISIBLE_DEVICES=0 vllm serve /media/ddc/新加卷/hys/hysnew/Qwen3.5-2B-AWQ \
   --api-key abc123 \
   --served-model-name Qwen/Qwen3-VL-4B-AWQ \
-  --max-model-len 10240 --port 7890 \
-  --gpu-memory-utilization 0.15 --max-num-seqs 10 \
-  --enable-auto-tool-choice --tool-call-parser qwen3_xml
+  --max-model-len 10240 \
+  --port 7890 \
+  --gpu-memory-utilization 0.15 \
+  --max-num-seqs 10 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_xml
 ```
 
 ### Embedding（Qwen3-Embedding-0.6B）
@@ -33,8 +36,10 @@ CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
   --model ./models/Qwen3-Embedding-0.6B \
   --api-key abc123 \
   --served-model-name Qwen3-Embedding-0.6B \
-  --convert embed --gpu-memory-utilization 0.08 \
-  --max-model-len 2048 --port 7891
+  --convert embed \
+  --gpu-memory-utilization 0.08 \
+  --max-model-len 2048 \
+  --port 7891
 ```
 
 ---
@@ -42,23 +47,34 @@ CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
 ## 视频处理
 
 ```bash
-# 基本：处理视频 + 输出
-python -m pipeline.cli video.mp4 --demo -o result.mp4
+# 处理视频 + 输出结果（默认硬编码模式）
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo \
+  --output /media/ddc/新加卷/hys/hysnew2/学习/result.mp4
+
+# 开启定时刷新（每150帧重新识别已跟踪船只）
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo --enable-refresh --output result.mp4
+
+# 定时刷新 + 自定义间隔（每100帧刷新一次）
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo --enable-refresh --gap-num 100 --output result.mp4
 
 # 并发模式（快）
-python -m pipeline.cli video.mp4 --demo -c --max-concurrent 8 -o result.mp4
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo -c --max-concurrent 8 --output result.mp4
 
 # Agent 模式（LangChain 工具链）
-python -m pipeline.cli video.mp4 --agent --demo -o result.mp4
-
-# 定时刷新（每 150 帧重新识别已跟踪船只）
-python -m pipeline.cli video.mp4 --demo --enable-refresh --gap-num 150 -o result.mp4
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --agent --demo --output result.mp4
 
 # 实时弹窗
-python -m pipeline.cli video.mp4 --demo --display -v
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo --display -v
 
 # 快速测试（只跑 50 帧）
-python -m pipeline.cli video.mp4 --demo --max-frames 50 -v
+python -m pipeline.cli /media/ddc/新加卷/hys/hysnew2/学习/1.mp4 \
+  --demo --max-frames 50 -v
 
 # 摄像头 / RTSP
 python -m pipeline.cli 0 --demo --display
@@ -88,7 +104,7 @@ ship-hull --verbose "我看到一艘灰色军舰"
 |------|------|------|
 | `--demo` | 画检测框 | 沿用 config |
 | `--display` | 弹窗实时显示 | 关 |
-| `-o` | 输出视频路径 | 无 |
+| `--output` / `-o` | 输出视频路径 | 无 |
 | `-c` | 并发模式 | 沿用 config |
 | `--max-concurrent N` | 并发 Agent 数 | 4 |
 | `--agent` | Agent 模式 | 关（硬编码） |
