@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from config import load_config
-from web.routes import api_router, pages_router
+from web.routes import api_router, pages_router, pipeline_router
 from web.services import ShipService
 
 
@@ -50,6 +50,7 @@ if _static_dir.exists():
 # ── 注册路由 ──
 app.include_router(pages_router)
 app.include_router(api_router)
+app.include_router(pipeline_router)
 
 
 # ── 启动入口 ──

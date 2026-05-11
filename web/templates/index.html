@@ -13,44 +13,223 @@
   <p>管理船只舷号数据库 — 支持 CSV / SQLite 后端</p>
 </div>
 
-<div class="container">
-  <!-- 统计栏 -->
-  <div class="stats-bar">
-    <div class="stat-card">
-      <div class="num" id="totalCount">-</div>
-      <div class="label">船只总数</div>
-    </div>
-    <div class="stat-card">
-      <div class="num" id="backendType">-</div>
-      <div class="label">数据后端</div>
-    </div>
-  </div>
-
-  <!-- 工具栏 -->
-  <div class="toolbar">
-    <input type="text" id="searchInput" placeholder="搜索舷号或描述…" />
-    <button class="btn btn-primary" onclick="openAddModal()">+ 新增船只</button>
-    <button class="btn btn-primary" onclick="openUploadModal()" style="background:#7c3aed">📷 上传图片识别</button>
-    <button class="btn btn-outline" onclick="openBulkModal()">批量导入</button>
-    <button class="btn btn-outline" onclick="loadShips()">刷新</button>
-  </div>
-
-  <!-- 表格 -->
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th style="width:120px">舷号</th>
-          <th>描述</th>
-          <th style="width:140px">操作</th>
-        </tr>
-      </thead>
-      <tbody id="shipTable">
-        <tr><td colspan="3" class="empty-msg">加载中…</td></tr>
-      </tbody>
-    </table>
-  </div>
+<!-- ── Tab 导航 ── -->
+<div class="tab-nav">
+  <button class="tab-btn active" data-tab="database" onclick="switchTab('database')">
+    <span class="tab-icon">🗄️</span> 数据库管理
+  </button>
+  <button class="tab-btn" data-tab="video-demo" onclick="switchTab('video-demo')">
+    <span class="tab-icon">🎬</span> 视频 Demo
+  </button>
+  <button class="tab-btn" data-tab="camera-demo" onclick="switchTab('camera-demo')">
+    <span class="tab-icon">📷</span> 摄像头 Demo
+  </button>
 </div>
+
+<div class="container">
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- Tab 1: 数据库管理 -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="tab-content active" id="tab-database">
+    <!-- 统计栏 -->
+    <div class="stats-bar">
+      <div class="stat-card">
+        <div class="num" id="totalCount">-</div>
+        <div class="label">船只总数</div>
+      </div>
+      <div class="stat-card">
+        <div class="num" id="backendType">-</div>
+        <div class="label">数据后端</div>
+      </div>
+    </div>
+
+    <!-- 工具栏 -->
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="搜索舷号或描述…" />
+      <button class="btn btn-primary" onclick="openAddModal()">+ 新增船只</button>
+      <button class="btn btn-primary" onclick="openUploadModal()" style="background:#7c3aed">📷 上传图片识别</button>
+      <button class="btn btn-outline" onclick="openBulkModal()">批量导入</button>
+      <button class="btn btn-outline" onclick="loadShips()">刷新</button>
+    </div>
+
+    <!-- 表格 -->
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:120px">舷号</th>
+            <th>描述</th>
+            <th style="width:140px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="shipTable">
+          <tr><td colspan="3" class="empty-msg">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- Tab 2: 视频 Demo -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-video-demo">
+
+    <!-- 上传区 -->
+    <div class="section-card">
+      <h3 class="section-title">📤 添加视频</h3>
+      <div class="upload-zone" id="videoUploadZone" onclick="document.getElementById('videoFileInput').click()">
+        <div class="icon">🎬</div>
+        <p>点击或拖拽视频到此处上传</p>
+        <p style="font-size:12px;color:#aaa;margin-top:4px">支持 MP4 / AVI / MKV / MOV / FLV / WebM，最大 500MB</p>
+        <div class="filename" id="videoUploadFilename"></div>
+        <input type="file" id="videoFileInput" accept="video/*" style="display:none" />
+      </div>
+      <div id="videoUploadProgress" class="progress-bar-wrap" style="display:none">
+        <div class="progress-bar" id="videoProgressBar"></div>
+        <span class="progress-text" id="videoProgressText">0%</span>
+      </div>
+    </div>
+
+    <!-- 视频列表 -->
+    <div class="section-card">
+      <div class="section-header">
+        <h3 class="section-title">🎥 Demo 视频列表</h3>
+        <button class="btn btn-outline btn-sm" onclick="loadVideoList()">刷新</button>
+      </div>
+      <div id="videoList" class="video-list">
+        <div class="empty-msg">加载中…</div>
+      </div>
+    </div>
+
+    <!-- Pipeline 控制 + 播放 -->
+    <div class="section-card" id="pipelineControl" style="display:none">
+      <div class="section-header">
+        <h3 class="section-title">⚡ Pipeline 控制</h3>
+        <div class="pipeline-actions">
+          <button class="btn btn-primary btn-sm" id="btnStartPipeline" onclick="startVideoPipeline()">▶ 开始处理</button>
+          <button class="btn btn-danger btn-sm" id="btnStopPipeline" onclick="stopVideoPipeline()" style="display:none">⏹ 停止</button>
+        </div>
+      </div>
+
+      <!-- 选项 -->
+      <div class="pipeline-options">
+        <label class="checkbox-label">
+          <input type="checkbox" id="optAgent" /> Agent 模式
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="optConcurrent" checked /> 并发模式
+        </label>
+      </div>
+
+      <!-- 状态 -->
+      <div id="pipelineStatus" class="pipeline-status">
+        <span class="status-dot idle"></span>
+        <span id="pipelineStatusText">等待开始</span>
+      </div>
+
+      <!-- 视频对比播放 -->
+      <div class="video-compare">
+        <div class="video-box">
+          <h4>原始视频</h4>
+          <video id="sourceVideo" controls class="demo-video"></video>
+        </div>
+        <div class="video-box">
+          <h4>处理结果</h4>
+          <video id="resultVideo" controls class="demo-video"></video>
+          <div id="resultPlaceholder" class="video-placeholder">
+            <span>🎬</span>
+            <p>处理完成后在此播放结果</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 历史任务 -->
+    <div class="section-card">
+      <div class="section-header">
+        <h3 class="section-title">📋 任务历史</h3>
+        <button class="btn btn-outline btn-sm" onclick="loadTaskHistory()">刷新</button>
+      </div>
+      <div id="taskHistory" class="task-list">
+        <div class="empty-msg">暂无任务</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- Tab 3: 摄像头 Demo -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-camera-demo">
+
+    <!-- 摄像头配置 -->
+    <div class="section-card">
+      <h3 class="section-title">📷 摄像头 / RTSP 配置</h3>
+      <div class="camera-config">
+        <div class="form-row">
+          <label>输入源</label>
+          <div class="input-group">
+            <select id="cameraSource" onchange="onCameraSourceChange()">
+              <option value="0">本地摄像头 (0)</option>
+              <option value="rtsp">RTSP 流</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input type="text" id="cameraUrl" placeholder="rtsp://192.168.1.100/stream" style="display:none" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>处理选项</label>
+          <div class="pipeline-options">
+            <label class="checkbox-label">
+              <input type="checkbox" id="camOptAgent" /> Agent 模式
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="camOptConcurrent" checked /> 并发模式
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="camOptDisplay" checked /> 显示实时画面
+            </label>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btnStartCamera" onclick="startCameraPipeline()">▶ 启动摄像头识别</button>
+          <button class="btn btn-danger" id="btnStopCamera" onclick="stopCameraPipeline()" style="display:none">⏹ 停止</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 状态 -->
+    <div class="section-card" id="cameraStatusCard" style="display:none">
+      <h3 class="section-title">📊 运行状态</h3>
+      <div id="cameraStatus" class="pipeline-status">
+        <span class="status-dot idle"></span>
+        <span id="cameraStatusText">未启动</span>
+      </div>
+      <div id="cameraOutput" class="camera-output">
+        <video id="cameraStream" controls class="demo-video" autoplay muted></video>
+      </div>
+    </div>
+
+    <!-- 说明 -->
+    <div class="section-card">
+      <h3 class="section-title">💡 使用说明</h3>
+      <div class="help-content">
+        <ul>
+          <li><strong>本地摄像头</strong>：选择输入源为"本地摄像头"，确保设备有可用摄像头</li>
+          <li><strong>RTSP 流</strong>：选择"RTSP 流"后填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
+          <li><strong>自定义</strong>：支持视频文件路径或任意 OpenCV 支持的输入源</li>
+          <li>处理结果将保存到 <code>demo_output</code> 目录</li>
+          <li>后端仍可通过 CLI 独立运行 pipeline</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- 数据库弹窗 (原有) -->
+<!-- ═══════════════════════════════════════════ -->
 
 <!-- 新增/编辑弹窗 -->
 <div class="modal-overlay" id="shipModal">
@@ -116,5 +295,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="/static/js/app.js"></script>
+<script src="/static/js/pipeline.js"></script>
 </body>
 </html>

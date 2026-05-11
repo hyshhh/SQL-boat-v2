@@ -56,6 +56,12 @@ _DEFAULTS: dict[str, Any] = {
     },
     "app": {"log_level": "INFO", "ship_db_path": "./data/ships.csv"},
     "web": {"host": "0.0.0.0", "port": 8000},
+    "demo_video": {
+        "dir": "./demovid",
+        "output_dir": "./demo_output",
+        "allowed_extensions": [".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm"],
+        "max_file_size_mb": 500,
+    },
 }
 
 

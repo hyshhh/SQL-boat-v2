@@ -40,6 +40,20 @@ web:
   host: "0.0.0.0"
   port: 8000
 
+# 视频 Demo 配置
+demo_video:
+  dir: "./demovid"          # 视频存储目录
+  output_dir: "./demo_output"  # Demo 输出目录
+  allowed_extensions:
+    - ".mp4"
+    - ".avi"
+    - ".mkv"
+    - ".mov"
+    - ".flv"
+    - ".wmv"
+    - ".webm"
+  max_file_size_mb: 500     # 最大上传文件大小 (MB)
+
 # Pipeline 视频处理流水线配置
 pipeline:
   concurrent_mode: true
