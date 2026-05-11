@@ -213,7 +213,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     start_time = time.time()
     max_frames = args.max_frames or 0
     process_every = args.process_every or 15
-    tracker_name = pipeline_cfg.get("tracker", "bytetrack")
+    tracker_name = pipeline_cfg.get("tracker") or "bytetrack"
 
     track_cache: dict[int, tuple[str, int]] = {}
     enable_refresh = args.enable_refresh
