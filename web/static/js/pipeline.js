@@ -420,6 +420,11 @@ async function startBrowserCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' },
       audio: false,
+    }).catch(err => {
+      if (err.name === 'NotAllowedError') throw new Error('摄像头权限被拒绝，请在浏览器弹窗中点击"允许"');
+      if (err.name === 'NotFoundError') throw new Error('未检测到摄像头设备，请确认电脑有可用摄像头');
+      if (err.name === 'NotReadableError') throw new Error('摄像头被其他程序占用，请关闭其他使用摄像头的应用');
+      throw new Error('摄像头访问失败: ' + err.message);
     });
     browserCameraStream = stream;
 
