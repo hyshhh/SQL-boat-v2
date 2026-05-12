@@ -379,8 +379,11 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
         logger.error("Pipeline 异常 [%s]: %s", task_id, e)
     finally:
         _running_processes.pop(task_id, None)
-        # 清理摄像头帧目录（如果存在）
-        _cleanup_stream_dir(task_id)
+        # 浏览器摄像头的帧目录由 WebSocket 断开后的 _delayed_cleanup 管理，
+        # 这里不要提前清理，否则 MJPEG 流和 WebSocket 写入会因目录消失而中断
+        is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
+        if not is_browser_cam:
+            _cleanup_stream_dir(task_id)
 
 
 @router.get("/status", response_model=PipelineStatusResponse)
@@ -470,6 +473,18 @@ async def camera_stream(task_id: str):
 
     async def generate():
         boundary = "--frame"
+        # 发送一个 1x1 黑色 JPEG 作为初始帧，确保 img 标签立即开始渲染
+        _black_jpeg = (
+            b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'
+            b'\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t'
+            b'\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a'
+            b'\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342'
+            b'\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00'
+            b'\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00'
+            b'\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b'
+            b'\xff\xda\x00\x08\x01\x01\x00\x00?\x00T\xdb\x9e\xb7\xa7\x93\x95'
+            b'\xff\xd9'
+        )
         while task_id in _task_status and _task_status[task_id]["status"] == "running":
             if frame_file.exists():
                 try:
@@ -486,12 +501,11 @@ async def camera_stream(task_id: str):
                     await asyncio.sleep(0.05)
                     continue
             else:
-                # 帧文件还没生成，发占位
+                # 发送黑色占位图而非 text/plain，img 标签可以正常渲染
                 yield (
                     f"{boundary}\r\n"
-                    f"Content-Type: text/plain\r\n\r\n"
-                    f"等待摄像头画面...\r\n"
-                ).encode()
+                    f"Content-Type: image/jpeg\r\n\r\n"
+                ).encode() + _black_jpeg + b"\r\n"
             await asyncio.sleep(0.05)  # ~20fps
 
     return StreamingResponse(
