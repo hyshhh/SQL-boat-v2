@@ -71,7 +71,13 @@ def main():
     web_cfg = config.get("web", {})
     host = web_cfg.get("host", "0.0.0.0")
     port = web_cfg.get("port", 8000)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        ws_ping_interval=None,  # 禁用 websockets 库自带 keepalive（已有应用层心跳）
+    )
 
 
 if __name__ == "__main__":
