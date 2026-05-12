@@ -728,6 +728,9 @@ async def get_output_video(filename: str):
     filename = _safe_filename(filename)
     output_dir = _get_output_dir()
     video_path = output_dir / filename
+    # 如果文件不存在，尝试补 .mp4 后缀
+    if not video_path.exists() and not filename.endswith('.mp4'):
+        video_path = output_dir / f"{filename}.mp4"
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
 
