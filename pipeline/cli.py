@@ -76,6 +76,8 @@ def _merge_args_to_config(args, config: dict) -> dict:
         config["pipeline"]["conf_threshold"] = args.conf
     if args.detect_every is not None:
         config["pipeline"]["detect_every_n_frames"] = args.detect_every
+    if args.iou is not None:
+        config["pipeline"]["iou_threshold"] = args.iou
     if args.no_screenshots is not None:
         config["pipeline"]["save_screenshots"] = not args.no_screenshots
     if args.enable_refresh is not None:

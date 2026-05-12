@@ -76,6 +76,7 @@ class ShipPipeline:
             model_path=pipe_cfg.get("yolo_model", "yolov8n.pt"),
             device=pipe_cfg.get("device", ""),
             conf_threshold=pipe_cfg.get("conf_threshold", 0.25),
+            iou_threshold=pipe_cfg.get("iou_threshold", 0.45),
             tracker_type=pipe_cfg.get("tracker", "bytetrack"),
             tracker_params=pipe_cfg.get("tracker_params"),
             classes=pipe_cfg.get("detect_classes", [8]),

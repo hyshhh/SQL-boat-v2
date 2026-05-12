@@ -47,6 +47,7 @@ class ShipDetector:
         model_path: str = "yolov8n.pt",
         device: str = "",
         conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45,
         tracker_type: str = "bytetrack",
         tracker_params: dict[str, Any] | None = None,
         classes: list[int] | None = None,
@@ -54,6 +55,7 @@ class ShipDetector:
         from ultralytics import YOLO
 
         self._conf_threshold = conf_threshold
+        self._iou_threshold = iou_threshold
         self._classes = classes
         self._device = device
         self._tracker_yaml = _build_tracker_yaml(tracker_type, tracker_params)
@@ -77,6 +79,7 @@ class ShipDetector:
         try:
             results = self._model.track(
                 source=frame, persist=True, conf=self._conf_threshold,
+                iou=self._iou_threshold,
                 tracker=self._tracker_yaml, classes=self._classes,
                 verbose=False, device=self._device or None,
             )
