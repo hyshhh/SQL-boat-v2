@@ -733,30 +733,40 @@ function startFrameCapture(ws, stream) {
   const video = document.getElementById('browserCameraPreview');
   if (!video) return;
 
-  let sending = false;
+  // 输出尺寸与 pipeline 一致，避免无谓的高分辨率编码/传输
+  const OUT_W = 640;
+  const OUT_H = 480;
+  const TARGET_INTERVAL = 66; // ~15fps
+  const JPEG_QUALITY = 0.7;
 
   const doCapture = () => {
     if (!browserCameraCanvas) {
       browserCameraCanvas = document.createElement('canvas');
     }
     const canvas = browserCameraCanvas;
+    canvas.width = OUT_W;
+    canvas.height = OUT_H;
+    const ctx = canvas.getContext('2d');
 
-    browserCameraTimer = setInterval(() => {
-      if (ws.readyState !== WebSocket.OPEN || sending) return;
+    let lastTime = 0;
 
-      sending = true;
-      canvas.width = video.videoWidth || 1280;
-      canvas.height = video.videoHeight || 720;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const tick = (now) => {
+      browserCameraTimer = requestAnimationFrame(tick);
+      if (now - lastTime < TARGET_INTERVAL) return;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      lastTime = now;
 
-      canvas.toBlob((blob) => {
-        if (blob && ws.readyState === WebSocket.OPEN) {
-          ws.send(blob);
-        }
-        sending = false;
-      }, 'image/jpeg', 0.7);
-    }, 66);
+      ctx.drawImage(video, 0, 0, OUT_W, OUT_H);
+
+      // toDataURL 同步完成，无回调延迟，不会跳帧
+      const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+      const binary = atob(dataUrl.split(',')[1]);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      ws.send(bytes.buffer);
+    };
+
+    browserCameraTimer = requestAnimationFrame(tick);
   };
 
   if (video.readyState >= 2) {
@@ -768,7 +778,7 @@ function startFrameCapture(ws, stream) {
 
 function stopFrameCapture() {
   if (browserCameraTimer) {
-    clearInterval(browserCameraTimer);
+    cancelAnimationFrame(browserCameraTimer);
     browserCameraTimer = null;
   }
   if (browserCameraWs) {

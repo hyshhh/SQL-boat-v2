@@ -906,11 +906,14 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
     """后台任务：从 pipeline stdout 读取 raw BGR 帧，启动 ffmpeg 编码为 H.264 fMP4"""
 
     # ffmpeg 命令：stdin raw BGR → H.264 fMP4
+    # 帧率设为 15 作为时间基准，但用 -tsiggen none + -fflags nobuffer 减少缓冲延迟
     ffmpeg_cmd = _find_binary("ffmpeg") or "ffmpeg"
     ffmpeg_args = [
         ffmpeg_cmd, "-hide_banner", "-loglevel", "error",
+        "-fflags", "+nobuffer",   # 减少输入缓冲
+        "-flags", "+low_delay",   # 低延迟模式
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-video_size", f"{w}x{h}",
-        "-r", "15",  # 输入帧率（匹配 pipeline 实际输出速率）
+        "-r", "15",  # 时间基准帧率
         "-i", "pipe:0",
         "-c:v", "libx264",
         "-preset", "ultrafast", "-tune", "zerolatency",

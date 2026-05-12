@@ -47,11 +47,10 @@ class VirtualCamera:
         if not self._opened:
             return False, None
 
-        # 节流：控制读取帧率
+        # 不再强制 sleep 节流 — pipeline 的处理速度本身就是帧率瓶颈，
+        # 额外 sleep 只会无意义地拉低帧率。帧率由浏览器端采集间隔控制。
+
         now = time.time()
-        elapsed = now - self._last_read_time
-        if elapsed < self._frame_interval:
-            time.sleep(self._frame_interval - elapsed)
 
         # 检查帧目录是否还存在（WebSocket 断开后可能被清理）
         if not self._dir.exists():
