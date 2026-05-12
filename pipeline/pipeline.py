@@ -500,7 +500,17 @@ class ShipPipeline:
                         source, "concurrent" if self._concurrent_mode else "cascade",
                         "on" if self._enable_refresh else "off", self._gap_num, self._detect_every_n, self._process_every_n)
 
+            # 停止信号文件路径（外部可以通过创建此文件来请求停止）
+            stop_file = None
+            if stream_dir:
+                stop_file = Path(stream_dir) / "__STOP__"
+
             while True:
+                # 检查停止信号文件
+                if stop_file and stop_file.exists():
+                    logger.info("检测到停止信号文件，优雅退出")
+                    break
+
                 ret, frame = input_src.read()
                 if not ret:
                     break

@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 # ── 全局状态 ──
 _running_processes: dict[str, asyncio.subprocess.Process] = {}
 _task_status: dict[str, dict[str, Any]] = {}
+_stop_signals: set[str] = set()  # 已发送停止信号的任务
 
 
 def _get_demo_config() -> dict:
@@ -509,12 +510,28 @@ async def _read_stderr(process: asyncio.subprocess.Process) -> bytes:
 
 
 async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str):
-    """异步等待 pipeline 完成，实时解析进度"""
+    """异步等待 pipeline 完成，实时解析进度，带超时保护"""
     # 启动并发 stderr 读取，避免缓冲区满导致死锁
     stderr_task = asyncio.create_task(_read_stderr(process))
     try:
         while True:
-            line = await process.stdout.readline()
+            try:
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=300)
+            except asyncio.TimeoutError:
+                # 5 分钟无输出 → 检查进程是否还活着
+                if process.returncode is not None:
+                    break
+                # 检查是否被标记为停止
+                if task_id in _stop_signals:
+                    logger.warning("Pipeline 超时且收到停止信号，强制终止: %s", task_id)
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    break
+                logger.warning("Pipeline 5分钟无输出，继续等待: %s", task_id)
+                continue
+
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
@@ -552,6 +569,7 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
         logger.error("Pipeline 异常 [%s]: %s", task_id, e)
     finally:
         _running_processes.pop(task_id, None)
+        _stop_signals.discard(task_id)
         # 浏览器摄像头的帧目录由 WebSocket 断开后的 _delayed_cleanup 管理，
         # 这里不要提前清理，否则 MJPEG 流和 WebSocket 写入会因目录消失而中断
         is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
@@ -584,43 +602,67 @@ async def stop_pipeline(task_id: str):
         if task_id in _task_status and _task_status[task_id]["status"] != "running":
             return {"success": True, "message": f"任务已结束: {task_id}"}
         raise HTTPException(status_code=404, detail=f"任务不存在或已结束: {task_id}")
+
+    # 标记停止信号（防止重复停止）
+    if task_id in _stop_signals:
+        return {"success": True, "message": f"任务正在停止中: {task_id}"}
+    _stop_signals.add(task_id)
+
     process = _running_processes[task_id]
+
+    # 写入停止信号文件（pipeline 可以检测到）
+    stream_dir = _get_stream_dir(task_id)
+    stop_file = stream_dir / "__STOP__"
     try:
-        # 先尝试 SIGTERM 整个进程组
-        import signal
+        stop_file.write_text("stop")
+    except Exception:
+        pass
+
+    import signal
+
+    # 第一步：SIGTERM 整个进程组
+    try:
+        pgid = os.getpgid(process.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        logger.info("已发送 SIGTERM 到进程组 %d (task=%s)", pgid, task_id)
+    except (ProcessLookupError, PermissionError):
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+
+    # 第二步：等待 3 秒，如果还没退出就 SIGKILL
+    try:
+        await asyncio.wait_for(process.wait(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.warning("SIGTERM 超时，强制 SIGKILL (task=%s)", task_id)
         try:
             pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGTERM)
+            os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            # SIGTERM 无效，强制 SIGKILL 整个进程组
             try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+                process.kill()
+            except ProcessLookupError:
                 pass
-    except ProcessLookupError:
-        pass  # 进程已退出
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+
+    # 更新状态
     _task_status[task_id]["status"] = "failed"
     _task_status[task_id]["error"] = "用户手动停止"
     _running_processes.pop(task_id, None)
-    # 清理帧目录
+    _stop_signals.discard(task_id)
+
+    # 清理帧目录和停止信号文件
     _cleanup_stream_dir(task_id)
+
     return {"success": True, "message": f"已停止任务: {task_id}"}
 
 
 def _cleanup_stream_dir(task_id: str):
-    """清理帧共享目录"""
+    """清理帧共享目录和停止信号文件"""
     import shutil
     d = Path("./_camera_frames") / task_id
     if d.exists():
@@ -634,10 +676,10 @@ def _cleanup_stream_dir(task_id: str):
 async def _delayed_cleanup(task_id: str, delay: int = 10):
     """延迟清理：等待 pipeline 自然结束后再清理目录"""
     await asyncio.sleep(delay)
-    # 如果 pipeline 还在运行，终止它
+    # 如果 pipeline 还在运行，强制终止
     if task_id in _running_processes:
         try:
-            _running_processes[task_id].terminate()
+            _running_processes[task_id].kill()
             await asyncio.wait_for(_running_processes[task_id].wait(), timeout=5)
         except Exception:
             pass
@@ -646,7 +688,8 @@ async def _delayed_cleanup(task_id: str, delay: int = 10):
     if task_id in _task_status and _task_status[task_id]["status"] == "running":
         _task_status[task_id]["status"] = "completed"
         _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
-    # 清理帧目录
+    # 清理帧目录和停止信号
+    _stop_signals.discard(task_id)
     _cleanup_stream_dir(task_id)
 
 

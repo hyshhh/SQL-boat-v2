@@ -327,45 +327,39 @@ async function startVideoPipeline() {
 async function stopVideoPipeline() {
   if (!currentTaskId) return;
   const taskId = currentTaskId;
+
+  // 先清除 MJPEG 实时预览（停止 img 标签对后端 stream 的持续请求）
+  const livePreview = document.getElementById('livePreview');
+  if (livePreview) {
+    livePreview.src = '';
+    livePreview.remove();
+  }
+
+  // 立即更新 UI 状态
+  updatePipelineStatus('failed', '正在停止...');
+  resetPipelineButtons();
+
   try {
     const resp = await fetch(`${PIPE_API}/stop/${taskId}`, { method: 'POST' });
     if (resp.ok || resp.status === 404) {
-      showToast('正在停止...');
+      showToast('已停止');
     } else {
       const data = await resp.json().catch(() => ({}));
-      throw new Error(data.detail || '停止失败');
+      showToast('停止: ' + (data.message || '完成'), 'info');
     }
   } catch (e) {
     showToast('已停止', 'info');
   }
-  // 不立即停止轮询，而是继续轮询几次等待后端确认状态
-  // 后端 stop 会将 status 设为 "failed"，轮询会检测到并完成清理
-  let confirmAttempts = 0;
-  const confirmTimer = setInterval(async () => {
-    confirmAttempts++;
-    try {
-      const resp = await fetch(`${PIPE_API}/status/${taskId}`);
-      const data = await resp.json();
-      if (data.status !== 'running' || confirmAttempts >= 5) {
-        clearInterval(confirmTimer);
-        updatePipelineStatus('failed', '已停止');
-        // 清除实时预览
-        const resultPlaceholder = document.getElementById('resultPlaceholder');
-        if (resultPlaceholder) {
-          resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
-        }
-        resetPipelineButtons();
-        stopStatusPolling();
-        currentTaskId = null;
-      }
-    } catch {
-      clearInterval(confirmTimer);
-      updatePipelineStatus('failed', '已停止');
-      resetPipelineButtons();
-      stopStatusPolling();
-      currentTaskId = null;
-    }
-  }, 500);
+
+  // 恢复结果占位
+  const resultPlaceholder = document.getElementById('resultPlaceholder');
+  if (resultPlaceholder) {
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+  }
+
+  stopStatusPolling();
+  currentTaskId = null;
+  loadTaskHistory();
 }
 
 function startStatusPolling() {
@@ -787,10 +781,23 @@ async function startCameraPipeline() {
 }
 
 async function stopCameraPipeline() {
-  // 停止浏览器摄像头推流
+  // 1. 先停止浏览器摄像头推流
   stopFrameCapture();
 
   const taskId = cameraTaskId;
+
+  // 2. 先清除 MJPEG 实时流（停止 img 标签对后端 stream 的持续请求）
+  const cameraStream = document.getElementById('cameraStream');
+  if (cameraStream) {
+    cameraStream.src = '';
+  }
+
+  // 3. 立即更新 UI
+  stopCameraPolling();
+  updateCameraStatus('idle', '正在停止...');
+  resetCameraButtons();
+
+  // 4. 发送停止请求到后端
   if (taskId) {
     try {
       await fetch(`${PIPE_API}/stop/${taskId}`, { method: 'POST' });
@@ -799,34 +806,10 @@ async function stopCameraPipeline() {
     }
   }
 
-  // 等待后端确认停止（最多 3 秒）
-  let confirmed = false;
-  if (taskId) {
-    for (let i = 0; i < 6; i++) {
-      await new Promise(r => setTimeout(r, 500));
-      try {
-        const resp = await fetch(`${PIPE_API}/status/${taskId}`);
-        const data = await resp.json();
-        if (data.status !== 'running') {
-          confirmed = true;
-          break;
-        }
-      } catch {
-        break;
-      }
-    }
-  }
-
-  stopCameraPolling();
-  updateCameraStatus('idle', '已停止');
-  resetCameraButtons();
-
-  // 清除实时流和结果视频
-  const cameraStream = document.getElementById('cameraStream');
+  // 5. 清除结果视频
   const cameraResultVideo = document.getElementById('cameraResultVideo');
   const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
   if (cameraStream) {
-    cameraStream.src = '';
     cameraStream.style.display = 'none';
   }
   if (cameraResultVideo) {
