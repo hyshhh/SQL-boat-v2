@@ -35,7 +35,6 @@ _DEFAULTS: dict[str, Any] = {
         "output_dir": "./output",
         "save_screenshots": True,
         "prompt_mode": "detailed",
-        "use_agent": False,
         "enable_refresh": False,
         "gap_num": 150,
         "demo": False,

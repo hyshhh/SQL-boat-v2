@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 class AgentResult:
-    """Agent/三步链路运行结果。"""
+    """三步链路运行结果。"""
 
     def __init__(
         self,

@@ -61,7 +61,6 @@ def _get_stream_dir(task_id: str) -> Path:
 
 class PipelineStartRequest(BaseModel):
     video_filename: str
-    use_agent: bool = False
     concurrent_mode: bool = True
     display: bool = False
     # ── 核心检测参数 ──
@@ -80,7 +79,6 @@ class PipelineStartRequest(BaseModel):
 
 
 class BrowserCameraStartRequest(BaseModel):
-    use_agent: bool = False
     concurrent_mode: bool = True
     # ── 核心检测参数 ──
     conf_threshold: float = 0.25
@@ -304,8 +302,6 @@ async def start_pipeline(req: PipelineStartRequest):
         video_source,
         "--output", str(output_path),
     ]
-    if req.use_agent:
-        cmd.append("--agent")
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
 
@@ -620,8 +616,6 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         "--camera",
         "--demo",
     ]
-    if req.use_agent:
-        cmd.append("--agent")
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
 

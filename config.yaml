@@ -63,7 +63,6 @@ pipeline:
   output_dir: "./output"
   save_screenshots: true
   prompt_mode: "detailed"
-  use_agent: false
   enable_refresh: false
   gap_num: 150
   demo: false

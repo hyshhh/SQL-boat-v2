@@ -262,7 +262,6 @@ async function startVideoPipeline() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         video_filename: selectedVideo,
-        use_agent: document.getElementById('optAgent').checked,
         concurrent_mode: document.getElementById('optConcurrent').checked,
         ...collectVideoParams(),
       }),
@@ -544,7 +543,6 @@ async function startBrowserCamera() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        use_agent: document.getElementById('camOptAgent').checked,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
         ...collectCameraParams(),
       }),
@@ -700,7 +698,6 @@ async function startCameraPipeline() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         video_filename: videoFilename,
-        use_agent: document.getElementById('camOptAgent').checked,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
         display: document.getElementById('camOptDisplay').checked,
         ...collectCameraParams(),

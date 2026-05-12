@@ -1,4 +1,4 @@
-"""CSV 数据源"""
+"""CSV 数据源 — 支持带表头的 hull_number,description 格式"""
 
 from __future__ import annotations
 
@@ -20,11 +20,26 @@ class CsvShipSource(ShipDataSource):
         self._data.clear()
         if not self._path.exists():
             return self._data
-        with open(self._path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 2:
-                    self._data[row[0].strip()] = row[1].strip()
+        with open(self._path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and "hull_number" in reader.fieldnames:
+                # 带表头格式：hull_number,description
+                for row in reader:
+                    hn = (row.get("hull_number") or "").strip()
+                    desc = (row.get("description") or "").strip()
+                    if hn:
+                        self._data[hn] = desc
+            else:
+                # 无表头格式：兼容旧数据
+                f.seek(0)
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) >= 2:
+                        hn = row[0].strip()
+                        desc = row[1].strip()
+                        if hn and hn != "hull_number":
+                            self._data[hn] = desc
+        logger.info("从 CSV 加载了 %d 条船记录: %s", len(self._data), self._path)
         return self._data
 
     def lookup(self, hull_number: str) -> str | None:
@@ -77,5 +92,6 @@ class CsvShipSource(ShipDataSource):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
+            writer.writerow(["hull_number", "description"])
             for hn, desc in sorted(self._data.items()):
                 writer.writerow([hn, desc])

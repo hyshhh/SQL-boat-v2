@@ -30,8 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--demo", action="store_true", default=None, help="开启 demo 模式（绘制检测框和识别结果）")
     parser.add_argument("--display", action="store_true", help="实时显示窗口（需要有显示器）")
     parser.add_argument("--concurrent", "-c", action="store_true", default=None, help="使用并发模式")
-    parser.add_argument("--agent", action="store_true", default=None, help="（兼容参数，已忽略）")
-    parser.add_argument("--no-agent", action="store_true", default=None, help="（兼容参数，已忽略）")
     parser.add_argument("--no-screenshots", action="store_true", default=None, help="关闭自动截图保存")
     parser.add_argument("--max-concurrent", type=int, default=None, help="最大并发推理数（默认 4）")
     parser.add_argument("--max-queued-frames", type=int, default=None, help="最大队列深度（默认 30）")
@@ -108,7 +106,7 @@ def _print_config(args, config: dict) -> None:
         f"[bold]🚢 船弦号识别视频流水线[/bold]\n\n"
         f"输入源: [cyan]{source_label}[/cyan]\n"
         f"模式: [{'green' if concurrent_mode else 'yellow'}]{'并发' if concurrent_mode else '级联'}[/]\n"
-        f"推理: [blue]硬编码三步链路 (VLM→Lookup→Retrieve)[/]\n"
+        f"推理: [blue]三步链路 (VLM→Lookup→Retrieve)[/]\n"
         f"并发数: {max_concurrent}\n"
         f"定时刷新: {'[green]开启[/green] (每%d帧)' % gap_num if enable_refresh else '[dim]关闭[/dim]'}\n"
         f"提示词: {prompt_mode}\n"

@@ -1,7 +1,7 @@
 [project]
 name = "xhsb"
 version = "2.0.0"
-description = "智能船弦号识别系统 — LangChain + YOLO + Qwen VLM"
+description = "智能船弦号识别系统 — YOLO + Qwen VLM + FAISS 向量检索"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.104.0",
@@ -10,12 +10,13 @@ dependencies = [
     "python-multipart>=0.0.6",
     "pyyaml>=6.0",
     "langchain-core>=0.3.0",
-    "langchain-openai>=0.2.0",
-    "langgraph>=0.2.0",
+    "langchain-community>=0.3.0",
+    "faiss-cpu>=1.7.0",
     "httpx>=0.25.0",
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
     "ultralytics>=8.0.0",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
