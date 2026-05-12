@@ -214,6 +214,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     max_frames = args.max_frames or 0
     process_every = args.process_every or 15
     tracker_name = pipeline_cfg.get("tracker") or "bytetrack"
+    tracker_params = pipeline_cfg.get("tracker_params", {})
 
     track_cache: dict[int, tuple[str, int]] = {}
     enable_refresh = args.enable_refresh
@@ -227,6 +228,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             ret, frame = cap.read()
             if not ret:
                 if is_camera:
+                    if not cap.isOpened():
+                        logger.error("摄像头已断开，停止处理")
+                        break
                     logger.warning("摄像头读取失败，重试...")
                     time.sleep(0.5)
                     continue
@@ -248,14 +252,18 @@ def run_pipeline(args: argparse.Namespace) -> int:
             # ── YOLO 检测 ──
             run_detection = (frame_idx % detect_every == 1) or (frame_idx == 1)
             if run_detection:
-                results = model.track(
-                    frame,
+                track_kwargs: dict = dict(
                     persist=True,
                     conf=conf_threshold,
                     classes=detect_classes,
-                    tracker=f"{tracker_name}.yaml" if tracker_name != "bytetrack" else None,
                     verbose=False,
                 )
+                # bytetrack 是 ultralytics 内置默认，无需指定 yaml；其他 tracker 需显式传
+                if tracker_name != "bytetrack":
+                    track_kwargs["tracker"] = f"{tracker_name}.yaml"
+                # 应用 tracker_params（track_high_thresh, track_low_thresh 等）
+                track_kwargs.update(tracker_params)
+                results = model.track(frame, **track_kwargs)
 
                 if results and results[0].boxes is not None:
                     boxes = results[0].boxes
