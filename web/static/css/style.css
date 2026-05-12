@@ -157,6 +157,7 @@ tbody tr:hover { background: #f8f9fb; }
 .toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
 .toast.success { background: var(--success); }
 .toast.error { background: var(--danger); }
+.toast.info { background: #1976d2; }
 
 /* ── Upload Zone ── */
 .upload-zone {

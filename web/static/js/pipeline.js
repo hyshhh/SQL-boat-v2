@@ -140,15 +140,15 @@ async function loadVideoList() {
     }
     container.innerHTML = data.videos.map(v => `
       <div class="video-item ${selectedVideo === v.filename ? 'selected' : ''}"
-           onclick="selectVideo('${escAttr(v.filename)}', this)">
+           onclick="selectVideo(this.dataset.name, this)" data-name="${safeAttr(v.filename)}">
         <div class="video-item-icon">🎬</div>
         <div class="video-item-info">
           <div class="video-item-name">${escHtml(v.filename)}</div>
           <div class="video-item-meta">${v.size_mb} MB</div>
         </div>
         <div class="video-item-actions">
-          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); playSourceVideo('${escAttr(v.filename)}')">▶ 预览</button>
-          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteVideo('${escAttr(v.filename)}')">🗑️</button>
+          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); playSourceVideo(this.dataset.name)" data-name="${safeAttr(v.filename)}">▶ 预览</button>
+          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteVideo(this.dataset.name)" data-name="${safeAttr(v.filename)}">🗑️</button>
         </div>
       </div>
     `).join('');
@@ -164,6 +164,15 @@ function selectVideo(filename, el) {
   // 更新选中状态
   document.querySelectorAll('.video-item').forEach(item => item.classList.remove('selected'));
   if (el) el.classList.add('selected');
+
+  // 重置源视频（停止旧视频播放）
+  const sourceVideo = document.getElementById('sourceVideo');
+  if (sourceVideo) {
+    sourceVideo.pause();
+    sourceVideo.removeAttribute('src');
+    sourceVideo.load();
+  }
+
   // 加载源视频
   playSourceVideo(filename);
   // 重置结果
@@ -378,6 +387,13 @@ async function pollTaskStatus() {
   if (!currentTaskId) return;
   try {
     const resp = await fetch(`${PIPE_API}/status/${currentTaskId}`);
+    if (resp.status === 404) {
+      // 任务已被清理，停止轮询
+      stopStatusPolling();
+      resetPipelineButtons();
+      currentTaskId = null;
+      return;
+    }
     const data = await resp.json();
     updatePipelineStatus(data.status, data.progress || data.error || '');
 
@@ -459,13 +475,13 @@ async function loadTaskHistory() {
           <div class="task-info">
             <div class="task-name">${escHtml(t.video_filename)}${cameraTag}</div>
             <div class="task-meta">
-              任务 ${t.task_id} · ${t.progress || t.error || t.status}
+              任务 ${escHtml(t.task_id)} · ${escHtml(t.progress || t.error || t.status)}
               ${t.output_filename ? ' · 输出: ' + escHtml(t.output_filename) : ''}
             </div>
           </div>
           <div class="task-actions">
-            ${t.status === 'completed' && t.output_filename ? `<button class="btn btn-outline btn-sm" onclick="playResultVideo('${escAttr(t.output_filename)}')">▶ 播放</button>` : ''}
-            ${t.status === 'running' ? `<button class="btn btn-danger btn-sm" onclick="stopTaskById('${escAttr(t.task_id)}')">⏹ 停止</button>` : ''}
+            ${t.status === 'completed' && t.output_filename ? `<button class="btn btn-outline btn-sm" onclick="playResultVideo(this.dataset.name)" data-name="${safeAttr(t.output_filename)}">▶ 播放</button>` : ''}
+            ${t.status === 'running' ? `<button class="btn btn-danger btn-sm" onclick="stopTaskById(this.dataset.id)" data-id="${safeAttr(t.task_id)}">⏹ 停止</button>` : ''}
           </div>
         </div>
       `;
@@ -489,19 +505,18 @@ function loadResultVideo(filename) {
 
   const url = `${PIPE_API}/outputs/${encodeURIComponent(filename)}`;
 
-  // 先检查文件是否存在
-  fetch(url, { method: 'HEAD' }).then(resp => {
-    if (!resp.ok) {
-      showToast('结果视频文件不存在: ' + filename, 'error');
-      return;
-    }
-    resultVideo.src = url;
+  // 直接设置 src，通过 onerror 检测加载失败
+  resultVideo.onerror = function () {
+    showToast('结果视频加载失败: ' + filename, 'error');
+    resultVideo.style.display = 'none';
+    if (resultPlaceholder) resultPlaceholder.style.display = '';
+  };
+  resultVideo.onloadeddata = function () {
     resultVideo.style.display = '';
     if (resultPlaceholder) resultPlaceholder.style.display = 'none';
-    resultVideo.load();
-  }).catch(() => {
-    showToast('无法加载结果视频', 'error');
-  });
+  };
+  resultVideo.src = url;
+  resultVideo.load();
 }
 
 async function stopTaskById(taskId) {
@@ -643,8 +658,19 @@ async function startBrowserCamera() {
       // 正常停止（用户点了停止）时不报错
       if (!cameraTaskId) return;
       console.warn('WebSocket 断开, code:', evt.code);
-      // 不立即停止，让状态轮询来判断 pipeline 是否还在运行
-      // 如果 pipeline 已经停了，pollCameraStatus 会处理
+      // 意外断开 — 尝试重连一次
+      if (evt.code !== 1000 && cameraTaskId) {
+        showToast('摄像头连接断开，尝试重连…', 'info');
+        setTimeout(() => {
+          if (!cameraTaskId) return; // 已被停止
+          const newWs = new WebSocket(wsUrl);
+          browserCameraWs = newWs;
+          newWs.onopen = ws.onopen;
+          newWs.onmessage = ws.onmessage;
+          newWs.onerror = ws.onerror;
+          newWs.onclose = ws.onclose;
+        }, 2000);
+      }
     };
 
   } catch (e) {
@@ -748,7 +774,6 @@ async function startCameraPipeline() {
       body: JSON.stringify({
         video_filename: videoFilename,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
-        display: document.getElementById('camOptDisplay').checked,
         ...collectCameraParams(),
       }),
     });
@@ -838,6 +863,13 @@ async function pollCameraStatus() {
   if (!cameraTaskId) return;
   try {
     const resp = await fetch(`${PIPE_API}/status/${cameraTaskId}`);
+    if (resp.status === 404) {
+      // 任务已被清理
+      stopCameraPolling();
+      resetCameraButtons();
+      cameraTaskId = null;
+      return;
+    }
     const data = await resp.json();
     updateCameraStatus(data.status, data.progress || data.error || '');
 
@@ -858,14 +890,13 @@ async function pollCameraStatus() {
           }
           if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
           // 加载结果视频
-          const url = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
-          fetch(url, { method: 'HEAD' }).then(r => {
-            if (r.ok && cameraResultVideo) {
-              cameraResultVideo.src = url;
-              cameraResultVideo.style.display = '';
-              cameraResultVideo.load();
-            }
-          });
+          if (cameraResultVideo) {
+            const url = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
+            cameraResultVideo.onerror = () => showToast('结果视频加载失败', 'error');
+            cameraResultVideo.src = url;
+            cameraResultVideo.style.display = '';
+            cameraResultVideo.load();
+          }
         }
       } else if (data.status === 'failed') {
         const errorMsg = data.error || '未知错误';
@@ -909,4 +940,9 @@ if (typeof escAttr === 'undefined') {
   function escAttr(s) {
     return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/'/g, "\\'");
   }
+}
+
+/** 安全地将文件名插入 HTML 属性（防 XSS） */
+function safeAttr(s) {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
