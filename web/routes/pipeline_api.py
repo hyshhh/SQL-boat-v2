@@ -211,6 +211,29 @@ def _probe_codec(video_path: str) -> str | None:
     return None
 
 
+def _probe_video_size(video_path: str) -> tuple[int, int] | None:
+    """用 ffprobe 检测视频分辨率。"""
+    _ensure_ffmpeg()
+    if not _FFPROBE:
+        return None
+    try:
+        ret = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ret.returncode == 0:
+            lines = ret.stdout.strip().split("\n")
+            if len(lines) >= 2:
+                w, h = int(lines[0]), int(lines[1])
+                if w > 0 and h > 0:
+                    return w, h
+    except Exception as e:
+        logger.warning("ffprobe 分辨率检测失败: %s → %s", video_path, e)
+    return None
+
+
 def _is_browser_compatible(video_path: str) -> bool:
     """检测视频是否被浏览器原生兼容。"""
     codec = _probe_codec(video_path)
@@ -545,6 +568,14 @@ async def start_pipeline(req: PipelineStartRequest):
             raise HTTPException(status_code=404, detail=f"视频不存在: {req.video_filename}")
         video_source = str(video_path)
 
+    # 检测视频分辨率（H.264 编码需要知道帧尺寸）
+    video_w, video_h = 640, 480  # 默认值
+    if not is_camera and video_path:
+        detected = _probe_video_size(str(video_path))
+        if detected:
+            video_w, video_h = detected
+            logger.info("视频分辨率: %dx%d", video_w, video_h)
+
     # 构建 pipeline 命令
     config = load_config()
     pipeline_cfg = config.get("pipeline", {})
@@ -617,7 +648,7 @@ async def start_pipeline(req: PipelineStartRequest):
 
         # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
         if not is_camera:
-            asyncio.create_task(_start_h264_reader(task_id, process))
+            asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h))
 
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
@@ -840,14 +871,8 @@ def _get_browser_frames_dir(task_id: str) -> Path:
 
 # ── H.264 推流管理 ──
 
-async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process):
+async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, w: int = 640, h: int = 480):
     """后台任务：从 pipeline stdout 读取 raw BGR 帧，启动 ffmpeg 编码为 H.264 fMP4"""
-    import struct
-
-    # 从 config 获取视频尺寸（pipeline 默认 640x480，会自动 resize）
-    config = load_config()
-    w = config.get("pipeline", {}).get("input_width", 640)
-    h = config.get("pipeline", {}).get("input_height", 480)
 
     # ffmpeg 命令：stdin raw BGR → H.264 fMP4
     ffmpeg_cmd = _find_binary("ffmpeg") or "ffmpeg"
@@ -900,6 +925,19 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process):
 
         frame_size = w * h * 3
         running = True
+
+        async def drain_ffmpeg_stderr():
+            """消费 ffmpeg stderr，防止 pipe buffer 满导致阻塞"""
+            try:
+                while running:
+                    line = await ffmpeg_proc.stderr.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if text:
+                        logger.debug("[ffmpeg %s] %s", task_id, text)
+            except (asyncio.IncompleteReadError, OSError):
+                pass
 
         async def feed_frames():
             """从 pipeline stdout 读 raw 帧 → ffmpeg stdin"""
@@ -957,8 +995,8 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process):
             finally:
                 running = False
 
-        # 并行运行 frame feeder + output reader
-        await asyncio.gather(feed_frames(), read_ffmpeg_output())
+        # 并行运行 frame feeder + output reader + stderr drainer
+        await asyncio.gather(feed_frames(), read_ffmpeg_output(), drain_ffmpeg_stderr())
 
     except Exception as e:
         logger.error("H.264 推流异常 [%s]: %s", task_id, e)

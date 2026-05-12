@@ -133,6 +133,10 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    # raw-stdout 模式：Rich console 输出到 stderr，避免污染 stdout 的二进制流
+    if args.raw_stdout:
+        console.file = sys.stderr
+
     from config import load_config
     config = load_config()
     config = _merge_args_to_config(args, config)
@@ -171,8 +175,11 @@ def main() -> None:
             table.add_row(key.replace("_", " ").title(), str(value))
         console.print(table)
 
-        # 输出 JSON 摘要供 pipeline_api 解析
-        print(f"\n__PIPELINE_SUMMARY__:{json.dumps(stats, ensure_ascii=False)}", flush=True)
+        # 输出 JSON 摘要供 pipeline_api 解析（raw-stdout 模式下输出到 stderr）
+        if args.raw_stdout:
+            print(f"\n__PIPELINE_SUMMARY__:{json.dumps(stats, ensure_ascii=False)}", file=sys.stderr, flush=True)
+        else:
+            print(f"\n__PIPELINE_SUMMARY__:{json.dumps(stats, ensure_ascii=False)}", flush=True)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]用户中断[/yellow]")
