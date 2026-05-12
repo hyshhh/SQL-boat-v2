@@ -324,22 +324,28 @@ class ShipPipeline:
     class _FrameWriter:
         """后台线程：异步编码 JPEG 并写入磁盘，不阻塞主检测循环。"""
 
-        def __init__(self, stream_dir: Path, quality: int = 70):
+        def __init__(self, stream_dir: Path, quality: int = 50):
             self._path = stream_dir / "latest.jpg"
             self._quality = quality
             self._queue: list = []  # 最多保留 1 帧
             self._lock = threading.Lock()
             self._stop = threading.Event()
+            self._frame_count = 0
+            self._drop_count = 0
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
         def write(self, frame: np.ndarray) -> None:
             with self._lock:
+                if self._queue:
+                    self._drop_count += 1
                 self._queue = [frame]
 
         def stop(self) -> None:
             self._stop.set()
             self._thread.join(timeout=2)
+            if self._drop_count:
+                logger.info("MJPEG 帧写入: 共 %d 帧, 丢弃 %d 帧", self._frame_count, self._drop_count)
 
         def _run(self) -> None:
             while not self._stop.is_set():
@@ -354,6 +360,7 @@ class ShipPipeline:
                         with open(tmp, "wb") as f:
                             f.write(buf.tobytes())
                         tmp.rename(self._path)
+                        self._frame_count += 1
                     except Exception:
                         pass
                 else:
