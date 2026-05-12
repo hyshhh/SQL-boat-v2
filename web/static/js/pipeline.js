@@ -873,6 +873,7 @@ async function pollCameraStatus() {
     if (data.status !== 'running') {
       stopCameraPolling();
       resetCameraButtons();
+      disconnectCameraH264();
       if (data.status === 'completed') {
         showToast('✅ 摄像头处理完成');
       } else if (data.status === 'failed') {

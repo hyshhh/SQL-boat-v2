@@ -36,6 +36,8 @@ class VirtualCamera:
         self._opened = True
         self._width = 0
         self._height = 0
+        self._first_frame_received = False
+        self._startup_timeout: float = 15.0     # 等待第一帧的最大超时（秒）
 
     def isOpened(self) -> bool:
         return self._opened
@@ -57,6 +59,20 @@ class VirtualCamera:
             return False, None
 
         frame_path = self._dir / "latest.jpg"
+
+        # 启动阶段：等待第一帧到达（浏览器摄像头需要时间建立连接并发送首帧）
+        if not self._first_frame_received:
+            deadline = time.time() + self._startup_timeout
+            while not frame_path.exists() and time.time() < deadline:
+                if not self._dir.exists():
+                    self._opened = False
+                    return False, None
+                time.sleep(0.1)
+            if not frame_path.exists():
+                logger.error("等待首帧超时 (%.0f 秒)，放弃", self._startup_timeout)
+                self._opened = False
+                return False, None
+
         if not frame_path.exists():
             # 帧还没到，返回上一帧（如果有）
             if self._last_frame is not None:
@@ -70,7 +86,7 @@ class VirtualCamera:
                 self._stale_count += 1
                 if self._stale_count >= self._max_stale:
                     # 超过 3 秒无新帧，认为推流已断开
-                    logger.warning("帧文件 %d 秒未更新，推流可能已断开", self._stale_count / self._fps)
+                    logger.warning("帧文件 %.1f 秒未更新，推流可能已断开", self._stale_count / self._fps)
                     self._opened = False
                     return False, None
                 # 还在容忍范围内，返回上一帧
@@ -91,6 +107,10 @@ class VirtualCamera:
             )
             if frame is None:
                 return (True, self._last_frame.copy()) if self._last_frame is not None else (False, None)
+
+            if not self._first_frame_received:
+                self._first_frame_received = True
+                logger.info("首帧已收到: %dx%d", frame.shape[1], frame.shape[0])
 
             self._last_frame = frame
             self._frame_count += 1
