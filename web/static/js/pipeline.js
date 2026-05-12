@@ -33,6 +33,9 @@ function switchTab(tabName) {
 let selectedVideo = null;
 let currentTaskId = null;
 let statusPollTimer = null;
+let streamWs = null;        // WebSocket 推流连接
+let streamCanvas = null;     // 渲染 canvas
+let streamCtx = null;
 
 // ── 视频上传 ──
 const videoUploadZone = document.getElementById('videoUploadZone');
@@ -247,13 +250,19 @@ async function startVideoPipeline() {
     document.getElementById('btnStartPipeline').style.display = 'none';
     document.getElementById('btnStopPipeline').style.display = '';
 
-    // 实时预览：显示 MJPEG 推流
+    // 实时预览：WebSocket 推流（比 MJPEG 效率更高）
     const resultPlaceholder = document.getElementById('resultPlaceholder');
     if (resultPlaceholder) {
-      resultPlaceholder.innerHTML = `<img id="livePreview" src="${PIPE_API}/stream/${currentTaskId}" style="max-width:100%;border-radius:8px;background:#000" alt="实时预览" />`;
+      resultPlaceholder.innerHTML = `
+        <canvas id="streamCanvas" style="max-width:100%;border-radius:8px;background:#000;display:block"></canvas>
+        <div id="streamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px">连接中...</div>
+      `;
       resultPlaceholder.style.display = '';
+      streamCanvas = document.getElementById('streamCanvas');
+      streamCtx = streamCanvas.getContext('2d');
     }
 
+    connectStreamWs(currentTaskId);
     startStatusPolling();
   } catch (e) {
     showToast('启动失败: ' + e.message, 'error');
@@ -263,16 +272,93 @@ async function startVideoPipeline() {
   }
 }
 
+/** 建立 WebSocket 推流连接 */
+function connectStreamWs(taskId) {
+  disconnectStreamWs();
+
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/stream/${taskId}`;
+
+  const img = new Image();
+  let frameCount = 0;
+  let fpsTimer = performance.now();
+
+  const ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  streamWs = ws;
+
+  ws.onmessage = (evt) => {
+    if (evt.data instanceof ArrayBuffer) {
+      // 二进制帧 = JPEG 数据，直接渲染到 canvas
+      const blob = new Blob([evt.data], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+
+      img.onload = () => {
+        if (streamCanvas && streamCtx) {
+          // 首次或尺寸变化时调整 canvas
+          if (streamCanvas.width !== img.naturalWidth || streamCanvas.height !== img.naturalHeight) {
+            streamCanvas.width = img.naturalWidth;
+            streamCanvas.height = img.naturalHeight;
+          }
+          streamCtx.drawImage(img, 0, 0);
+        }
+        URL.revokeObjectURL(url);
+
+        // FPS 统计
+        frameCount++;
+        const now = performance.now();
+        if (now - fpsTimer > 1000) {
+          const fps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
+          const fpsEl = document.getElementById('streamFps');
+          if (fpsEl) fpsEl.textContent = `${fps} FPS`;
+          frameCount = 0;
+          fpsTimer = now;
+        }
+      };
+      img.src = url;
+
+    } else {
+      // JSON 控制消息
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === 'done') {
+          disconnectStreamWs();
+          const fpsEl = document.getElementById('streamFps');
+          if (fpsEl) fpsEl.textContent = '处理完成';
+        }
+      } catch {}
+    }
+  };
+
+  ws.onclose = () => {
+    // 如果任务还在运行，尝试重连
+    if (currentTaskId === taskId) {
+      setTimeout(() => {
+        if (currentTaskId === taskId) connectStreamWs(taskId);
+      }, 1000);
+    }
+  };
+
+  ws.onerror = () => {};
+}
+
+/** 断开 WebSocket 推流 */
+function disconnectStreamWs() {
+  if (streamWs) {
+    streamWs.onclose = null; // 阻止重连
+    streamWs.close();
+    streamWs = null;
+  }
+  streamCanvas = null;
+  streamCtx = null;
+}
+
 async function stopVideoPipeline() {
   if (!currentTaskId) return;
   const taskId = currentTaskId;
 
-  // 清除 MJPEG 实时预览（停止 img 标签对后端 stream 的持续请求）
-  const livePreview = document.getElementById('livePreview');
-  if (livePreview) {
-    livePreview.src = '';
-    livePreview.remove();
-  }
+  // 断开 WebSocket 推流
+  disconnectStreamWs();
 
   // 更新 UI 状态
   updatePipelineStatus('failed', '正在停止...');
@@ -329,8 +415,8 @@ async function pollTaskStatus() {
     if (data.status === 'completed') {
       stopStatusPolling();
       resetPipelineButtons();
+      disconnectStreamWs();
       showToast('✅ 处理完成!');
-      // 恢复占位
       const resultPlaceholder = document.getElementById('resultPlaceholder');
       if (resultPlaceholder) {
         resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
@@ -340,7 +426,7 @@ async function pollTaskStatus() {
     } else if (data.status === 'failed') {
       stopStatusPolling();
       resetPipelineButtons();
-      // 恢复占位
+      disconnectStreamWs();
       const resultPlaceholder = document.getElementById('resultPlaceholder');
       if (resultPlaceholder) {
         resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';

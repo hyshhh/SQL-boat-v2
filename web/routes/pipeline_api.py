@@ -837,11 +837,99 @@ def _get_browser_frames_dir(task_id: str) -> Path:
     return d
 
 
-# ── 摄像头 MJPEG 流 ──
+# ── WebSocket 实时推流 ──
+
+# 每个 task 的 WebSocket 观众集合
+_ws_viewers: dict[str, set[WebSocket]] = {}
+
+
+@router.websocket("/ws/stream/{task_id}")
+async def ws_stream(websocket: WebSocket, task_id: str):
+    """WebSocket 实时推流 — 比 MJPEG 效率更高，支持多客户端、跳帧、低延迟"""
+    async with _state_lock:
+        if task_id not in _task_status:
+            await websocket.close(code=4004, reason="任务不存在")
+            return
+
+    await websocket.accept()
+
+    # 注册观众
+    async with _state_lock:
+        _ws_viewers.setdefault(task_id, set()).add(websocket)
+
+    stream_dir = _get_stream_dir(task_id)
+    frame_file = stream_dir / "latest.jpg"
+    loop = asyncio.get_event_loop()
+    last_mtime = 0.0
+    target_interval = 0.033  # ~30fps
+    no_frame_count = 0
+
+    try:
+        while True:
+            # 检查任务是否还在运行
+            async with _state_lock:
+                task = _task_status.get(task_id)
+                if not task or task["status"] != "running":
+                    # 发送结束信号
+                    try:
+                        await websocket.send_json({"type": "done"})
+                    except Exception:
+                        pass
+                    break
+
+            t0 = loop.time()
+
+            if frame_file.exists():
+                try:
+                    stat = await loop.run_in_executor(None, frame_file.stat)
+                    mtime = stat.st_mtime
+
+                    if mtime != last_mtime:
+                        last_mtime = mtime
+                        no_frame_count = 0
+                        frame_data = await loop.run_in_executor(None, frame_file.read_bytes)
+                        if frame_data:
+                            # 二进制帧：直接发 JPEG bytes，零额外开销
+                            await websocket.send_bytes(frame_data)
+                    else:
+                        no_frame_count += 1
+                        # 超过 3 秒无新帧，发 ping 保活
+                        if no_frame_count > 90:
+                            no_frame_count = 0
+                            try:
+                                await websocket.send_json({"type": "heartbeat"})
+                            except Exception:
+                                break
+                except (OSError, FileNotFoundError):
+                    await asyncio.sleep(0.01)
+                    continue
+            else:
+                # 无帧文件，等待
+                await asyncio.sleep(0.05)
+
+            # 动态 sleep，保持目标帧率
+            elapsed = loop.time() - t0
+            sleep_time = max(0.005, target_interval - elapsed)
+            await asyncio.sleep(sleep_time)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug("WebSocket 推流异常 [%s]: %s", task_id, e)
+    finally:
+        # 注销观众
+        async with _state_lock:
+            viewers = _ws_viewers.get(task_id, set())
+            viewers.discard(websocket)
+            if not viewers:
+                _ws_viewers.pop(task_id, None)
+
+
+# ── 保留旧 MJPEG 端点兼容（摄像头 Demo 仍用 img 标签）──
 
 @router.get("/stream/{task_id}")
 async def camera_stream(task_id: str):
-    """MJPEG 实时流 — 从 pipeline 写入的 latest.jpg 读取帧"""
+    """MJPEG 兼容端点 — 供摄像头 Demo 的 img 标签使用"""
     async with _state_lock:
         if task_id not in _task_status:
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -863,12 +951,11 @@ async def camera_stream(task_id: str):
             b'\xff\xd9'
         )
         last_mtime = 0.0
-        target_interval = 0.04  # ~25fps
+        target_interval = 0.04
         loop = asyncio.get_event_loop()
         no_frame_count = 0
 
         while True:
-            # 检查任务是否还在运行
             async with _state_lock:
                 task = _task_status.get(task_id)
                 if not task or task["status"] != "running":
@@ -892,7 +979,6 @@ async def camera_stream(task_id: str):
                             ).encode() + frame_data + b"\r\n"
                     else:
                         no_frame_count += 1
-                        # 超过 5 秒无新帧（~125 次循环），发送心跳避免连接超时
                         if no_frame_count > 125:
                             no_frame_count = 0
                             yield (
