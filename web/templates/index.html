@@ -201,7 +201,7 @@
         </div>
         <div class="video-box">
           <h4>处理结果</h4>
-          <video id="resultVideo" controls class="demo-video"></video>
+          <video id="resultVideo" controls class="demo-video" onerror="showToast('视频加载失败，可能编码格式不支持','error')"></video>
           <div id="resultPlaceholder" class="video-placeholder">
             <span>🎬</span>
             <p>处理完成后在此播放结果</p>

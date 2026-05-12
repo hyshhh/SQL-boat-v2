@@ -346,11 +346,7 @@ async function pollTaskStatus() {
         resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
       }
       if (data.output_filename) {
-        const resultVideo = document.getElementById('resultVideo');
-        resultVideo.src = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
-        resultVideo.style.display = '';
-        if (resultPlaceholder) resultPlaceholder.style.display = 'none';
-        resultVideo.load();
+        loadResultVideo(data.output_filename);
       }
       loadTaskHistory();
     } else if (data.status === 'failed') {
@@ -428,13 +424,31 @@ async function loadTaskHistory() {
 
 function playResultVideo(filename) {
   switchTab('video-demo');
-  const resultVideo = document.getElementById('resultVideo');
-  if (!resultVideo) return;
-  resultVideo.src = `${PIPE_API}/outputs/${encodeURIComponent(filename)}`;
-  resultVideo.style.display = '';
-  document.getElementById('resultPlaceholder').style.display = 'none';
-  resultVideo.load();
+  loadResultVideo(filename);
   document.getElementById('pipelineControl').style.display = '';
+}
+
+/** 加载结果视频，带错误处理 */
+function loadResultVideo(filename) {
+  const resultVideo = document.getElementById('resultVideo');
+  const resultPlaceholder = document.getElementById('resultPlaceholder');
+  if (!resultVideo) return;
+
+  const url = `${PIPE_API}/outputs/${encodeURIComponent(filename)}`;
+
+  // 先检查文件是否存在
+  fetch(url, { method: 'HEAD' }).then(resp => {
+    if (!resp.ok) {
+      showToast('结果视频文件不存在: ' + filename, 'error');
+      return;
+    }
+    resultVideo.src = url;
+    resultVideo.style.display = '';
+    if (resultPlaceholder) resultPlaceholder.style.display = 'none';
+    resultVideo.load();
+  }).catch(() => {
+    showToast('无法加载结果视频', 'error');
+  });
 }
 
 async function stopTaskById(taskId) {

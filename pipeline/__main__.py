@@ -245,6 +245,26 @@ def run_pipeline(args: argparse.Namespace) -> int:
     enable_refresh = args.enable_refresh
     gap_num = args.gap_num
 
+    # ── 活跃跟踪缓存：每帧都画框，不只是检测帧 ──
+    # track_id → (x1, y1, x2, y2, conf, last_seen_frame)
+    active_tracks: dict[int, tuple[int, int, int, int, float, int]] = {}
+    TRACK_STALE_FRAMES = pipeline_cfg.get("max_stale_frames", 300)
+
+    # 不同 track_id 使用不同颜色
+    _track_colors = [
+        (0, 255, 0),    # 绿
+        (0, 200, 255),  # 橙黄
+        (255, 100, 0),  # 蓝
+        (0, 0, 255),    # 红
+        (255, 0, 255),  # 紫
+        (0, 255, 255),  # 黄
+        (255, 255, 0),  # 青
+        (128, 0, 255),  # 粉
+    ]
+
+    def _get_track_color(tid: int) -> tuple[int, int, int]:
+        return _track_colors[tid % len(_track_colors)]
+
     logger.info("开始处理 (max_frames=%s, process_every=%d, detect_every=%d)",
                 max_frames or "不限", process_every, detect_every)
 
@@ -274,7 +294,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
             annotated = frame.copy() if (args.demo or stream_dir) else None
 
-            # ── YOLO 检测 ──
+            # ── YOLO 检测（仅在检测帧运行）──
             run_detection = (frame_idx % detect_every == 1) or (frame_idx == 1)
             if run_detection:
                 track_kwargs: dict = dict(
@@ -295,12 +315,19 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     boxes = results[0].boxes
                     has_ids = boxes.id is not None
 
+                    # 记录本轮检测到的 track_id，用于清理过期 track
+                    seen_ids = set()
+
                     for i in range(len(boxes)):
                         x1, y1, x2, y2 = map(int, boxes.xyxy[i].tolist())
                         conf = float(boxes.conf[i])
                         cls_id = int(boxes.cls[i])
                         track_id = int(boxes.id[i]) if has_ids and boxes.id is not None else -1
                         detections_total += 1
+                        seen_ids.add(track_id)
+
+                        # 更新活跃跟踪缓存
+                        active_tracks[track_id] = (x1, y1, x2, y2, conf, frame_idx)
 
                         # VLM 识别
                         if frame_idx % process_every == 0 or frame_idx == 1:
@@ -318,18 +345,33 @@ def run_pipeline(args: argparse.Namespace) -> int:
                                         track_cache[track_id] = (hull_number, frame_idx)
                                         logger.info("帧 %d | Track %d → 弦号: %s", frame_idx, track_id, hull_number)
 
-                        # 画框
-                        if annotated is not None:
-                            label_parts = [f"id:{track_id}"]
-                            if track_id in track_cache:
-                                hn, _ = track_cache[track_id]
-                                label_parts.append(hn)
-                            label_parts.append(f"{conf:.2f}")
-                            label = " ".join(label_parts)
+                    # 清理过期 track（连续多帧未检测到的）
+                    stale_ids = [
+                        tid for tid, (_, _, _, _, _, last) in active_tracks.items()
+                        if tid not in seen_ids and frame_idx - last > TRACK_STALE_FRAMES
+                    ]
+                    for tid in stale_ids:
+                        del active_tracks[tid]
 
-                            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.putText(annotated, label, (x1, y1 - 8),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # ── 画框（每帧都画，不只是检测帧）──
+            if annotated is not None and active_tracks:
+                for track_id, (x1, y1, x2, y2, conf, _) in active_tracks.items():
+                    color = _get_track_color(track_id)
+
+                    # 标签：弦号（如有）+ 置信度
+                    label_parts = []
+                    if track_id in track_cache:
+                        hn, _ = track_cache[track_id]
+                        label_parts.append(hn)
+                    label_parts.append(f"{conf:.2f}")
+                    label = " ".join(label_parts)
+
+                    # 画框 + 标签背景
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(annotated, (x1, y1 - th - 10), (x1 + tw + 4, y1), color, -1)
+                    cv2.putText(annotated, label, (x1 + 2, y1 - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             # ── 写入输出视频 ──
             if writer and annotated is not None:
@@ -393,6 +435,27 @@ def run_pipeline(args: argparse.Namespace) -> int:
         logger.info("识别结果:")
         for tid, (hn, _) in sorted(track_cache.items()):
             logger.info("  Track %d → %s", tid, hn)
+
+    # ── 转码为 H.264（浏览器兼容）──
+    if writer_path and writer_path.exists() and writer_path.stat().st_size > 0:
+        try:
+            import subprocess
+            h264_path = writer_path.with_suffix(".h264.mp4")
+            ret = subprocess.run(
+                ["ffmpeg", "-y", "-i", str(writer_path),
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                 "-c:a", "copy", str(h264_path)],
+                capture_output=True, timeout=300,
+            )
+            if ret.returncode == 0 and h264_path.exists():
+                # 替换原文件
+                writer_path.unlink()
+                h264_path.rename(writer_path)
+                logger.info("已转码为 H.264: %s", writer_path)
+            else:
+                logger.warning("H.264 转码失败，保留原始文件: %s", ret.stderr.decode()[-200:])
+        except Exception as e:
+            logger.warning("H.264 转码异常: %s（保留原始文件）", e)
 
     summary = {
         "total_frames": frame_idx,
