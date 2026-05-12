@@ -194,8 +194,8 @@ class ShipDatabase:
             ))
         return docs
 
-    def _load_or_build_vector_store(self) -> FAISS:
-        """加载缓存的向量库，或从数据重新构建。"""
+    def _load_or_build_vector_store(self) -> FAISS | None:
+        """加载缓存的向量库，或从数据重新构建。Embedding API 不可用时返回 None。"""
         persist_dir = Path(self._persist_path)
         index_file = persist_dir / "index.faiss"
 
@@ -221,24 +221,25 @@ class ShipDatabase:
 
         docs = self._build_documents()
         if not docs:
-            logger.warning("无数据可构建向量库，返回空向量库")
-            # 创建一个空的 FAISS 向量库
-            vs = FAISS.from_texts(["placeholder"], self._embeddings)
+            logger.warning("无数据可构建向量库，语义检索将不可用")
+            return None
+
+        try:
+            logger.info("正在构建 FAISS 向量库（%d 条文档）…", len(docs))
+            vs = FAISS.from_documents(docs, self._embeddings)
+
+            persist_dir.mkdir(parents=True, exist_ok=True)
+            vs.save_local(str(persist_dir))
+
+            self._save_hash(self._compute_data_hash())
+            logger.info("向量库已持久化到 %s，哈希已更新", persist_dir)
             return vs
-
-        logger.info("正在构建 FAISS 向量库（%d 条文档）…", len(docs))
-        vs = FAISS.from_documents(docs, self._embeddings)
-
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        vs.save_local(str(persist_dir))
-
-        self._save_hash(self._compute_data_hash())
-        logger.info("向量库已持久化到 %s，哈希已更新", persist_dir)
-
-        return vs
+        except Exception as e:
+            logger.warning("向量库构建失败（%s），语义检索将不可用", e)
+            return None
 
     @property
-    def vector_store(self) -> FAISS:
+    def vector_store(self) -> FAISS | None:
         """懒加载向量库（首次访问时自动构建或加载缓存）。"""
         if self._vector_store is None or self._data_changed():
             self._vector_store = self._load_or_build_vector_store()
@@ -255,7 +256,11 @@ class ShipDatabase:
     def semantic_search(self, query: str, top_k: int | None = None) -> list[dict]:
         """FAISS 向量语义检索。"""
         k = top_k or self._top_k
-        results_with_score = self.vector_store.similarity_search_with_score(query, k=k)
+        vs = self.vector_store
+        if vs is None:
+            logger.debug("向量库不可用，跳过语义检索")
+            return []
+        results_with_score = vs.similarity_search_with_score(query, k=k)
 
         results = []
         for doc, distance in results_with_score:
