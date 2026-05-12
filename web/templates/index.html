@@ -74,144 +74,154 @@
   <!-- Tab 2: 视频 Demo -->
   <!-- ═══════════════════════════════════════════ -->
   <div class="tab-content" id="tab-video-demo">
+    <div class="demo-layout">
 
-    <!-- 上传区 -->
-    <div class="section-card">
-      <h3 class="section-title">📤 添加视频</h3>
-      <div class="upload-zone" id="videoUploadZone" onclick="document.getElementById('videoFileInput').click()">
-        <div class="icon">🎬</div>
-        <p>点击或拖拽视频到此处上传</p>
-        <p style="font-size:12px;color:#aaa;margin-top:4px">支持 MP4 / AVI / MKV / MOV / FLV / WebM，最大 500MB</p>
-        <div class="filename" id="videoUploadFilename"></div>
-        <input type="file" id="videoFileInput" accept="video/*" style="display:none" />
-      </div>
-      <div id="videoUploadProgress" class="progress-bar-wrap" style="display:none">
-        <div class="progress-bar" id="videoProgressBar"></div>
-        <span class="progress-text" id="videoProgressText">0%</span>
-      </div>
-    </div>
+      <!-- ── 左栏：视频播放 + 控制 ── -->
+      <div class="demo-main">
 
-    <!-- 视频列表 -->
-    <div class="section-card">
-      <div class="section-header">
-        <h3 class="section-title">🎥 Demo 视频列表</h3>
-        <button class="btn btn-outline btn-sm" onclick="loadVideoList()">刷新</button>
-      </div>
-      <div id="videoList" class="video-list">
-        <div class="empty-msg">加载中…</div>
-      </div>
-    </div>
+        <!-- Pipeline 控制 + 播放（合并为一个卡片） -->
+        <div class="section-card" id="pipelineControl" style="display:none">
+          <div class="section-header">
+            <h3 class="section-title">⚡ 实时预览</h3>
+            <div class="pipeline-actions">
+              <button class="btn btn-primary btn-sm" id="btnStartPipeline" onclick="startVideoPipeline()">▶ 开始处理</button>
+              <button class="btn btn-danger btn-sm" id="btnStopPipeline" onclick="stopVideoPipeline()" style="display:none">⏹ 停止</button>
+            </div>
+          </div>
 
-    <!-- Pipeline 参数配置（始终可见） -->
-    <div class="section-card">
-      <h3 class="section-title">⚙️ Pipeline 参数</h3>
-      <div class="pipeline-options">
-        <label class="checkbox-label">
-          <input type="checkbox" id="optConcurrent" checked /> 并发模式
-        </label>
-      </div>
+          <!-- 状态条 -->
+          <div id="pipelineStatus" class="pipeline-status">
+            <span class="status-dot idle"></span>
+            <span id="pipelineStatusText">等待开始</span>
+          </div>
 
-      <!-- 核心参数 -->
-      <div class="param-grid">
-        <div class="param-item">
-          <label>置信度阈值 <span class="param-val" id="optConfVal">0.25</span></label>
-          <input type="range" id="optConf" min="0.05" max="0.95" step="0.05" value="0.25"
-                 oninput="document.getElementById('optConfVal').textContent=this.value" />
+          <!-- 视频播放区 -->
+          <div class="result-area">
+            <div id="resultPlaceholder" class="video-placeholder">
+              <span>🎬</span>
+              <p>选择视频后点击"开始处理"</p>
+            </div>
+          </div>
         </div>
-        <div class="param-item">
-          <label>IoU 阈值 <span class="param-val" id="optIouVal">0.45</span></label>
-          <input type="range" id="optIou" min="0.1" max="0.95" step="0.05" value="0.45"
-                 oninput="document.getElementById('optIouVal').textContent=this.value" />
-        </div>
-        <div class="param-item">
-          <label>VLM 推理间隔 (帧)</label>
-          <input type="number" id="optProcessEvery" value="15" min="1" max="1000" />
-        </div>
-        <div class="param-item">
-          <label>检测间隔 (帧)</label>
-          <input type="number" id="optDetectEvery" value="2" min="1" max="100" />
+
+        <!-- 历史任务 -->
+        <div class="section-card">
+          <div class="section-header">
+            <h3 class="section-title">📋 任务历史</h3>
+            <button class="btn btn-outline btn-sm" onclick="loadTaskHistory()">刷新</button>
+          </div>
+          <div id="taskHistory" class="task-list">
+            <div class="empty-msg">暂无任务</div>
+          </div>
         </div>
       </div>
 
-      <!-- 高级参数 (折叠) -->
-      <details class="advanced-params">
-        <summary>⚙️ 高级参数</summary>
-        <div class="param-grid">
-          <div class="param-item">
-            <label>最大处理帧数 (0=不限)</label>
-            <input type="number" id="optMaxFrames" value="0" min="0" />
+      <!-- ── 右栏：配置 + 视频列表 ── -->
+      <div class="demo-sidebar">
+
+        <!-- 上传区 -->
+        <div class="section-card">
+          <h3 class="section-title">📤 添加视频</h3>
+          <div class="upload-zone" id="videoUploadZone" onclick="document.getElementById('videoFileInput').click()">
+            <div class="icon">🎬</div>
+            <p>点击或拖拽视频到此处上传</p>
+            <p style="font-size:12px;color:#aaa;margin-top:4px">MP4 / AVI / MKV / MOV / FLV / WebM</p>
+            <div class="filename" id="videoUploadFilename"></div>
+            <input type="file" id="videoFileInput" accept="video/*" style="display:none" />
           </div>
-          <div class="param-item">
-            <label>计算设备</label>
-            <select id="optDevice">
-              <option value="">自动</option>
-              <option value="cpu">CPU</option>
-              <option value="0">GPU 0</option>
-            </select>
+          <div id="videoUploadProgress" class="progress-bar-wrap" style="display:none">
+            <div class="progress-bar" id="videoProgressBar"></div>
+            <span class="progress-text" id="videoProgressText">0%</span>
           </div>
-          <div class="param-item">
-            <label>YOLO 模型</label>
-            <input type="text" id="optYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
+        </div>
+
+        <!-- 视频列表 -->
+        <div class="section-card">
+          <div class="section-header">
+            <h3 class="section-title">🎥 视频列表</h3>
+            <button class="btn btn-outline btn-sm" onclick="loadVideoList()">刷新</button>
           </div>
-          <div class="param-item">
-            <label>VLM 提示模式</label>
-            <select id="optPromptMode">
-              <option value="detailed">详细</option>
-              <option value="brief">简洁</option>
-            </select>
+          <div id="videoList" class="video-list">
+            <div class="empty-msg">加载中…</div>
           </div>
-          <div class="param-item">
-            <label>最大并发数</label>
-            <input type="number" id="optMaxConcurrent" value="4" min="1" max="16" />
-          </div>
-          <div class="param-item">
-            <label>刷新间隔 (帧)</label>
-            <input type="number" id="optGapNum" value="150" min="1" />
-          </div>
-          <div class="param-item param-checkbox">
+        </div>
+
+        <!-- Pipeline 参数配置 -->
+        <div class="section-card">
+          <h3 class="section-title">⚙️ 参数配置</h3>
+          <div class="pipeline-options">
             <label class="checkbox-label">
-              <input type="checkbox" id="optEnableRefresh" /> 定时刷新识别
+              <input type="checkbox" id="optConcurrent" checked /> 并发模式
             </label>
           </div>
+
+          <!-- 核心参数 -->
+          <div class="param-grid">
+            <div class="param-item">
+              <label>置信度 <span class="param-val" id="optConfVal">0.25</span></label>
+              <input type="range" id="optConf" min="0.05" max="0.95" step="0.05" value="0.25"
+                     oninput="document.getElementById('optConfVal').textContent=this.value" />
+            </div>
+            <div class="param-item">
+              <label>IoU <span class="param-val" id="optIouVal">0.45</span></label>
+              <input type="range" id="optIou" min="0.1" max="0.95" step="0.05" value="0.45"
+                     oninput="document.getElementById('optIouVal').textContent=this.value" />
+            </div>
+            <div class="param-item">
+              <label>VLM 间隔 (帧)</label>
+              <input type="number" id="optProcessEvery" value="15" min="1" max="1000" />
+            </div>
+            <div class="param-item">
+              <label>检测间隔 (帧)</label>
+              <input type="number" id="optDetectEvery" value="2" min="1" max="100" />
+            </div>
+          </div>
+
+          <!-- 高级参数 (折叠) -->
+          <details class="advanced-params">
+            <summary>⚙️ 高级参数</summary>
+            <div class="param-grid">
+              <div class="param-item">
+                <label>最大帧数 (0=不限)</label>
+                <input type="number" id="optMaxFrames" value="0" min="0" />
+              </div>
+              <div class="param-item">
+                <label>设备</label>
+                <select id="optDevice">
+                  <option value="">自动</option>
+                  <option value="cpu">CPU</option>
+                  <option value="0">GPU 0</option>
+                </select>
+              </div>
+              <div class="param-item">
+                <label>YOLO 模型</label>
+                <input type="text" id="optYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
+              </div>
+              <div class="param-item">
+                <label>提示模式</label>
+                <select id="optPromptMode">
+                  <option value="detailed">详细</option>
+                  <option value="brief">简洁</option>
+                </select>
+              </div>
+              <div class="param-item">
+                <label>最大并发</label>
+                <input type="number" id="optMaxConcurrent" value="4" min="1" max="16" />
+              </div>
+              <div class="param-item">
+                <label>刷新间隔 (帧)</label>
+                <input type="number" id="optGapNum" value="150" min="1" />
+              </div>
+              <div class="param-item param-checkbox">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="optEnableRefresh" /> 定时刷新
+                </label>
+              </div>
+            </div>
+          </details>
         </div>
-      </details>
-    </div>
-
-    <!-- Pipeline 控制 + 播放 -->
-    <div class="section-card" id="pipelineControl" style="display:none">
-      <div class="section-header">
-        <h3 class="section-title">⚡ Pipeline 控制</h3>
-        <div class="pipeline-actions">
-          <button class="btn btn-primary btn-sm" id="btnStartPipeline" onclick="startVideoPipeline()">▶ 开始处理</button>
-          <button class="btn btn-danger btn-sm" id="btnStopPipeline" onclick="stopVideoPipeline()" style="display:none">⏹ 停止</button>
-        </div>
       </div>
 
-      <!-- 状态 -->
-      <div id="pipelineStatus" class="pipeline-status">
-        <span class="status-dot idle"></span>
-        <span id="pipelineStatusText">等待开始</span>
-      </div>
-
-      <!-- 实时预览 -->
-      <div class="result-area">
-        <h4>处理结果</h4>
-        <div id="resultPlaceholder" class="video-placeholder">
-          <span>🎬</span>
-          <p>点击"开始处理"后实时显示识别结果</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- 历史任务 -->
-    <div class="section-card">
-      <div class="section-header">
-        <h3 class="section-title">📋 任务历史</h3>
-        <button class="btn btn-outline btn-sm" onclick="loadTaskHistory()">刷新</button>
-      </div>
-      <div id="taskHistory" class="task-list">
-        <div class="empty-msg">暂无任务</div>
-      </div>
     </div>
   </div>
 
