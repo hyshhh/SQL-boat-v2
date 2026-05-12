@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -359,6 +360,7 @@ async def start_pipeline(req: PipelineStartRequest):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(Path.cwd()),
+            preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
         )
         _running_processes[task_id] = process
         asyncio.create_task(_wait_pipeline(task_id, process, output_filename))
@@ -453,13 +455,37 @@ async def get_task_status(task_id: str):
 async def stop_pipeline(task_id: str):
     """停止正在运行的 Pipeline"""
     if task_id not in _running_processes:
+        # 检查是否任务已结束
+        if task_id in _task_status and _task_status[task_id]["status"] != "running":
+            return {"success": True, "message": f"任务已结束: {task_id}"}
         raise HTTPException(status_code=404, detail=f"任务不存在或已结束: {task_id}")
     process = _running_processes[task_id]
-    process.terminate()
     try:
-        await asyncio.wait_for(process.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
-        process.kill()
+        # 先尝试 SIGTERM 整个进程组
+        import signal
+        try:
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            # SIGTERM 无效，强制 SIGKILL 整个进程组
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+    except ProcessLookupError:
+        pass  # 进程已退出
     _task_status[task_id]["status"] = "failed"
     _task_status[task_id]["error"] = "用户手动停止"
     _running_processes.pop(task_id, None)
@@ -638,6 +664,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(Path.cwd()),
+            preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
         )
         _running_processes[task_id] = process
         asyncio.create_task(_wait_pipeline(task_id, process, output_filename))

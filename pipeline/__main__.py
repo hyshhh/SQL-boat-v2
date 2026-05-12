@@ -221,7 +221,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         logger.warning("VLM 初始化失败: %s（将仅做检测框标注）", e)
 
     def recognize_frame(frame_crop) -> str:
-        """对裁剪区域调用 VLM 识别舷号"""
+        """对裁剪区域调用 VLM 识别舷号，并通过向量库匹配验证"""
         if vlm is None:
             return ""
         try:
@@ -233,10 +233,65 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ])
             resp = vlm.invoke([msg])
-            return resp.content.strip().strip('"').strip("'")
+            vlm_result = resp.content.strip().strip('"').strip("'")
+
+            # 向量库匹配验证
+            if vlm_result and ship_db is not None:
+                try:
+                    # 精确查找
+                    exact_match = ship_db.lookup(vlm_result)
+                    if exact_match:
+                        logger.debug("弦号 %s 精确匹配数据库", vlm_result)
+                        return vlm_result
+
+                    # 语义搜索找最相似的
+                    semantic_results = ship_db.semantic_search(vlm_result, top_k=1)
+                    if semantic_results and semantic_results[0].get("score", 0) >= 0.7:
+                        best_match = semantic_results[0]["hull_number"]
+                        logger.info("弦号 '%s' 语义匹配 → '%s' (score=%.3f)",
+                                    vlm_result, best_match, semantic_results[0]["score"])
+                        return best_match
+                except Exception as e:
+                    logger.debug("向量库匹配异常: %s", e)
+
+            return vlm_result
         except Exception as e:
             logger.debug("VLM 识别异常: %s", e)
             return ""
+
+    def _nms_active_tracks(tracks: dict, iou_thresh: float = 0.5) -> dict:
+        """对活跃跟踪框做 NMS，去除重叠严重的冗余框"""
+        if len(tracks) <= 1:
+            return tracks
+
+        items = list(tracks.items())
+        # 按置信度降序排列
+        items.sort(key=lambda x: x[1][4], reverse=True)
+
+        keep = []
+        suppressed = set()
+
+        for i, (tid_i, (x1_i, y1_i, x2_i, y2_i, conf_i, _)) in enumerate(items):
+            if tid_i in suppressed:
+                continue
+            keep.append((tid_i, items[i][1]))
+            for j in range(i + 1, len(items)):
+                tid_j, (x1_j, y1_j, x2_j, y2_j, conf_j, _) = items[j]
+                if tid_j in suppressed:
+                    continue
+                # 计算 IoU
+                inter_x1 = max(x1_i, x1_j)
+                inter_y1 = max(y1_i, y1_j)
+                inter_x2 = min(x2_i, x2_j)
+                inter_y2 = min(y2_i, y2_j)
+                inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                area_i = (x2_i - x1_i) * (y2_i - y1_i)
+                area_j = (x2_j - x1_j) * (y2_j - y1_j)
+                union_area = area_i + area_j - inter_area
+                if union_area > 0 and inter_area / union_area > iou_thresh:
+                    suppressed.add(tid_j)
+
+        return dict(keep)
 
     # ── 显示窗口（仅 --display 且无 stream-dir）──
     display_enabled = args.display and not stream_dir
@@ -287,7 +342,16 @@ def run_pipeline(args: argparse.Namespace) -> int:
     # ── 活跃跟踪缓存：每帧都画框，不只是检测帧 ──
     # track_id → (x1, y1, x2, y2, conf, last_seen_frame)
     active_tracks: dict[int, tuple[int, int, int, int, float, int]] = {}
-    TRACK_STALE_FRAMES = pipeline_cfg.get("max_stale_frames", 300)
+    TRACK_STALE_FRAMES = pipeline_cfg.get("max_stale_frames", 60)
+
+    # ── 初始化向量库（用于弦号匹配验证）──
+    ship_db = None
+    try:
+        from database import ShipDatabase
+        ship_db = ShipDatabase(config=config)
+        logger.info("向量库已加载，船只数量: %d", len(ship_db))
+    except Exception as e:
+        logger.warning("向量库加载失败: %s（将仅使用 VLM 识别）", e)
 
     # 不同 track_id 使用不同颜色
     _track_colors = [
@@ -391,6 +455,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     ]
                     for tid in stale_ids:
                         del active_tracks[tid]
+
+                    # NMS 去除重叠框（IoU > 0.5 的冗余框）
+                    active_tracks = _nms_active_tracks(active_tracks, iou_thresh=0.5)
 
             # ── 画框（每帧都画，不只是检测帧）──
             if annotated is not None and active_tracks:

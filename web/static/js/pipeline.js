@@ -301,20 +301,25 @@ async function stopVideoPipeline() {
   if (!currentTaskId) return;
   try {
     const resp = await fetch(`${PIPE_API}/stop/${currentTaskId}`, { method: 'POST' });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '停止失败');
-    showToast('已停止');
-    updatePipelineStatus('failed', '已停止');
-    // 清除实时预览
-    const resultPlaceholder = document.getElementById('resultPlaceholder');
-    if (resultPlaceholder) {
-      resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+    if (resp.ok || resp.status === 404) {
+      // 404 也视为成功（任务可能已自然结束）
+      showToast('已停止');
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.detail || '停止失败');
     }
-    resetPipelineButtons();
-    stopStatusPolling();
   } catch (e) {
-    showToast(e.message, 'error');
+    // 网络错误也继续清理 UI
+    showToast('已停止', 'info');
   }
+  updatePipelineStatus('failed', '已停止');
+  // 清除实时预览
+  const resultPlaceholder = document.getElementById('resultPlaceholder');
+  if (resultPlaceholder) {
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+  }
+  resetPipelineButtons();
+  stopStatusPolling();
 }
 
 function startStatusPolling() {
@@ -736,7 +741,9 @@ async function stopCameraPipeline() {
   if (cameraTaskId) {
     try {
       await fetch(`${PIPE_API}/stop/${cameraTaskId}`, { method: 'POST' });
-    } catch {}
+    } catch {
+      // 忽略网络错误
+    }
   }
   updateCameraStatus('idle', '已停止');
   resetCameraButtons();
