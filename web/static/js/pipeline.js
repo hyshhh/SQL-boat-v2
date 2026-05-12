@@ -742,14 +742,19 @@ async function stopCameraPipeline() {
   resetCameraButtons();
   stopCameraPolling();
 
-  // 清除实时流
+  // 清除实时流和结果视频
   const cameraStream = document.getElementById('cameraStream');
+  const cameraResultVideo = document.getElementById('cameraResultVideo');
   const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
   if (cameraStream) {
     cameraStream.src = '';
     cameraStream.style.display = 'none';
-    if (cameraPlaceholder) cameraPlaceholder.style.display = '';
   }
+  if (cameraResultVideo) {
+    cameraResultVideo.src = '';
+    cameraResultVideo.style.display = 'none';
+  }
+  if (cameraPlaceholder) cameraPlaceholder.style.display = '';
 
   cameraTaskId = null;
   showToast('摄像头已停止');
@@ -779,6 +784,27 @@ async function pollCameraStatus() {
       resetCameraButtons();
       if (data.status === 'completed') {
         showToast('✅ 摄像头处理完成');
+        // 切换到结果视频
+        if (data.output_filename) {
+          const cameraStream = document.getElementById('cameraStream');
+          const cameraResultVideo = document.getElementById('cameraResultVideo');
+          const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
+          // 隐藏 MJPEG 流
+          if (cameraStream) {
+            cameraStream.src = '';
+            cameraStream.style.display = 'none';
+          }
+          if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
+          // 加载结果视频
+          const url = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
+          fetch(url, { method: 'HEAD' }).then(r => {
+            if (r.ok && cameraResultVideo) {
+              cameraResultVideo.src = url;
+              cameraResultVideo.style.display = '';
+              cameraResultVideo.load();
+            }
+          });
+        }
       } else if (data.status === 'failed') {
         showToast('摄像头处理失败: ' + (data.error || ''), 'error');
       }

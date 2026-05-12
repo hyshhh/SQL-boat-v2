@@ -358,6 +358,8 @@
       <div id="cameraOutput" class="camera-output">
         <!-- MJPEG 实时流：用 img 标签接收 multipart/x-mixed-replace -->
         <img id="cameraStream" class="demo-video" style="display:none;max-width:100%;border-radius:8px;background:#000" alt="摄像头实时画面" />
+        <!-- 处理结果视频 -->
+        <video id="cameraResultVideo" controls class="demo-video" style="display:none" onerror="showToast('视频加载失败','error')"></video>
         <div id="cameraStreamPlaceholder" class="video-placeholder">
           <span>📷</span>
           <p>启动后显示实时画面</p>
