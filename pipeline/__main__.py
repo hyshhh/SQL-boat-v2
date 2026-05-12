@@ -216,6 +216,29 @@ def run_pipeline(args: argparse.Namespace) -> int:
     tracker_name = pipeline_cfg.get("tracker") or "bytetrack"
     tracker_params = pipeline_cfg.get("tracker_params", {})
 
+    # 如果有自定义 tracker_params，写入临时 yaml 覆盖默认值
+    _custom_tracker_yaml: str | None = None
+    if tracker_name == "bytetrack" and tracker_params:
+        import tempfile, yaml as _yaml
+        # 读取内置 bytetrack.yaml 作为基础
+        try:
+            from pathlib import Path as _P
+            import ultralytics
+            base_yaml = _P(ultralytics.__file__).parent / "cfg" / "trackers" / "bytetrack.yaml"
+            if base_yaml.exists():
+                with open(base_yaml) as f:
+                    cfg = _yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+        except Exception:
+            cfg = {}
+        cfg.update(tracker_params)
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="bytetrack_custom_", delete=False)
+        _yaml.dump(cfg, tmp)
+        tmp.close()
+        _custom_tracker_yaml = tmp.name
+        logger.info("使用自定义 tracker 配置: %s", _custom_tracker_yaml)
+
     track_cache: dict[int, tuple[str, int]] = {}
     enable_refresh = args.enable_refresh
     gap_num = args.gap_num
@@ -259,10 +282,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     verbose=False,
                 )
                 # bytetrack 是 ultralytics 内置默认，无需指定 yaml；其他 tracker 需显式传
-                if tracker_name != "bytetrack":
+                if _custom_tracker_yaml:
+                    track_kwargs["tracker"] = _custom_tracker_yaml
+                elif tracker_name != "bytetrack":
                     track_kwargs["tracker"] = f"{tracker_name}.yaml"
-                # 应用 tracker_params（track_high_thresh, track_low_thresh 等）
-                track_kwargs.update(tracker_params)
                 results = model.track(frame, **track_kwargs)
 
                 if results and results[0].boxes is not None:
@@ -350,6 +373,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
             writer.release()
         if display_enabled:
             cv2.destroyAllWindows()
+        # 清理临时 tracker yaml
+        if _custom_tracker_yaml:
+            try:
+                os.unlink(_custom_tracker_yaml)
+            except OSError:
+                pass
 
     # ── 汇总 ──
     elapsed = time.time() - start_time
