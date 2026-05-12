@@ -102,17 +102,9 @@
       </div>
     </div>
 
-    <!-- Pipeline 控制 + 播放 -->
-    <div class="section-card" id="pipelineControl" style="display:none">
-      <div class="section-header">
-        <h3 class="section-title">⚡ Pipeline 控制</h3>
-        <div class="pipeline-actions">
-          <button class="btn btn-primary btn-sm" id="btnStartPipeline" onclick="startVideoPipeline()">▶ 开始处理</button>
-          <button class="btn btn-danger btn-sm" id="btnStopPipeline" onclick="stopVideoPipeline()" style="display:none">⏹ 停止</button>
-        </div>
-      </div>
-
-      <!-- 选项 -->
+    <!-- Pipeline 参数配置（始终可见） -->
+    <div class="section-card">
+      <h3 class="section-title">⚙️ Pipeline 参数</h3>
       <div class="pipeline-options">
         <label class="checkbox-label">
           <input type="checkbox" id="optAgent" /> Agent 模式
@@ -186,6 +178,17 @@
           </div>
         </div>
       </details>
+    </div>
+
+    <!-- Pipeline 控制 + 播放 -->
+    <div class="section-card" id="pipelineControl" style="display:none">
+      <div class="section-header">
+        <h3 class="section-title">⚡ Pipeline 控制</h3>
+        <div class="pipeline-actions">
+          <button class="btn btn-primary btn-sm" id="btnStartPipeline" onclick="startVideoPipeline()">▶ 开始处理</button>
+          <button class="btn btn-danger btn-sm" id="btnStopPipeline" onclick="stopVideoPipeline()" style="display:none">⏹ 停止</button>
+        </div>
+      </div>
 
       <!-- 状态 -->
       <div id="pipelineStatus" class="pipeline-status">
