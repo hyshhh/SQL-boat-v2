@@ -157,8 +157,10 @@ def _ensure_ffmpeg():
     global _FFMPEG, _FFPROBE
     if _FFMPEG is None:
         _FFMPEG = _find_binary("ffmpeg") or ""
+        logger.info("ffmpeg 查找结果: %s", _FFMPEG or "(未找到)")
     if _FFPROBE is None:
         _FFPROBE = _find_binary("ffprobe") or ""
+        logger.info("ffprobe 查找结果: %s", _FFPROBE or "(未找到)")
 
 def _probe_codec(video_path: str) -> str | None:
     """用 ffprobe 检测视频编码。"""
@@ -177,8 +179,11 @@ def _probe_codec(video_path: str) -> str | None:
             codec = ret.stdout.strip().lower()
             if codec:
                 return codec
+            logger.warning("ffprobe 输出为空 (rc=%d): %s | stderr: %s", ret.returncode, video_path, ret.stderr.strip()[:200])
+        else:
+            logger.warning("ffprobe 失败 (rc=%d): %s | stderr: %s", ret.returncode, video_path, ret.stderr.strip()[:200])
     except Exception as e:
-        logger.warning("ffprobe 检测失败: %s", e)
+        logger.warning("ffprobe 异常: %s → %s", video_path, e)
     return None
 
 
@@ -387,6 +392,47 @@ async def delete_video(filename: str):
 
 
 # ── 视频编码检测 ──
+
+@router.get("/debug/ffmpeg")
+async def debug_ffmpeg():
+    """诊断 ffmpeg/ffprobe 可用性"""
+    _ensure_ffmpeg()
+    result = {
+        "ffmpeg_path": _FFMPEG,
+        "ffprobe_path": _FFPROBE,
+        "ffmpeg_exists": os.path.isfile(_FFMPEG) if _FFMPEG else False,
+        "ffprobe_exists": os.path.isfile(_FFPROBE) if _FFPROBE else False,
+    }
+
+    # 测试 ffprobe 执行
+    if _FFPROBE:
+        try:
+            ret = subprocess.run(
+                [_FFPROBE, "-version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            result["ffprobe_version"] = ret.stdout.strip()[:200]
+            result["ffprobe_rc"] = ret.returncode
+            if ret.returncode != 0:
+                result["ffprobe_stderr"] = ret.stderr.strip()[:200]
+        except Exception as e:
+            result["ffprobe_error"] = str(e)
+
+    # 测试 ffmpeg 执行
+    if _FFMPEG:
+        try:
+            ret = subprocess.run(
+                [_FFMPEG, "-version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            result["ffmpeg_version"] = ret.stdout.strip()[:200]
+            result["ffmpeg_rc"] = ret.returncode
+            if ret.returncode != 0:
+                result["ffmpeg_stderr"] = ret.stderr.strip()[:200]
+        except Exception as e:
+            result["ffmpeg_error"] = str(e)
+
+    return result
 
 @router.get("/videos/{filename}/codec")
 async def check_video_codec(filename: str):
