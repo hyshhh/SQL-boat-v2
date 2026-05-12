@@ -1064,16 +1064,26 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
     try:
         while True:
             try:
-                data = await asyncio.wait_for(queue.get(), timeout=5.0)
+                data = await asyncio.wait_for(queue.get(), timeout=3.0)
             except asyncio.TimeoutError:
-                # 队列空闲 5 秒，检查任务状态
+                # 队列空闲 — 检查任务状态，发送心跳保活
                 async with _state_lock:
                     task = _task_status.get(task_id)
                 if not task or task["status"] != "running":
+                    # 任务已结束，通知前端
+                    try:
+                        await ws.send_json({"type": "done"})
+                    except Exception:
+                        pass
+                    break
+                # 任务仍在运行，发心跳防止浏览器/代理超时断开
+                try:
+                    await ws.send_json({"type": "heartbeat"})
+                except Exception:
                     break
                 continue
             try:
-                await asyncio.wait_for(ws.send_bytes(data), timeout=2.0)
+                await asyncio.wait_for(ws.send_bytes(data), timeout=5.0)
             except asyncio.TimeoutError:
                 logger.debug("观众发送超时，断开: %s", task_id)
                 break
