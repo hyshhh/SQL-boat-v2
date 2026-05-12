@@ -29,6 +29,9 @@ class VirtualCamera:
         self._frame_interval = 1.0 / fps
         self._last_frame: np.ndarray | None = None
         self._last_read_time: float = 0.0
+        self._last_mtime: float = 0.0          # 上次读到的文件修改时间
+        self._stale_count: int = 0              # 连续未更新帧计数
+        self._max_stale: int = int(fps * 3)     # 3 秒无新帧视为断流
         self._frame_count = 0
         self._opened = True
         self._width = 0
@@ -61,6 +64,23 @@ class VirtualCamera:
             return False, None
 
         try:
+            # 检查文件是否被更新（WebSocket 还在推流）
+            mtime = frame_path.stat().st_mtime
+            if mtime == self._last_mtime:
+                self._stale_count += 1
+                if self._stale_count >= self._max_stale:
+                    # 超过 3 秒无新帧，认为推流已断开
+                    logger.warning("帧文件 %d 秒未更新，推流可能已断开", self._stale_count / self._fps)
+                    self._opened = False
+                    return False, None
+                # 还在容忍范围内，返回上一帧
+                if self._last_frame is not None:
+                    return True, self._last_frame.copy()
+                return False, None
+            else:
+                self._stale_count = 0
+                self._last_mtime = mtime
+
             data = frame_path.read_bytes()
             if not data:
                 return (True, self._last_frame.copy()) if self._last_frame is not None else (False, None)
