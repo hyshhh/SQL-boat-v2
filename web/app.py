@@ -29,6 +29,16 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
     logging.getLogger(__name__).info("Web 服务启动，初始化数据库…")
+
+    # 检测 ffmpeg/ffprobe 可用性
+    import shutil
+    ffmpeg = shutil.which("ffmpeg") or ""
+    ffprobe = shutil.which("ffprobe") or ""
+    if ffmpeg and ffprobe:
+        logging.getLogger(__name__).info("ffmpeg/ffprobe 可用: %s / %s", ffmpeg, ffprobe)
+    else:
+        logging.getLogger(__name__).warning("ffmpeg/ffprobe 不可用！视频转码功能将被禁用。ffmpeg=%s ffprobe=%s", ffmpeg or "(未找到)", ffprobe or "(未找到)")
+
     config = load_config()
     app.state.ship_service = ShipService(config=config)
     yield

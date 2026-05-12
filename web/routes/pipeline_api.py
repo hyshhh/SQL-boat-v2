@@ -135,11 +135,37 @@ def _safe_filename(filename: str) -> str:
 # ── 视频编码检测与转码 ──
 
 _BROWSER_COMPATIBLE_CODECS = {"h264", "vp8", "vp9", "av1", "mpeg4part10"}
-_FFMPEG = "/usr/bin/ffmpeg"
-_FFPROBE = "/usr/bin/ffprobe"
+
+def _find_binary(name: str) -> str | None:
+    """查找二进制文件，支持多种路径。"""
+    import shutil
+    # 1. shutil.which (最可靠，检查 PATH + 可执行权限)
+    found = shutil.which(name)
+    if found:
+        return found
+    # 2. 常见绝对路径
+    for path in [f"/usr/bin/{name}", f"/usr/local/bin/{name}", f"/snap/bin/{name}"]:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+_FFMPEG: str | None = None
+_FFPROBE: str | None = None
+
+def _ensure_ffmpeg():
+    """延迟查找 ffmpeg/ffprobe，首次调用时检测。"""
+    global _FFMPEG, _FFPROBE
+    if _FFMPEG is None:
+        _FFMPEG = _find_binary("ffmpeg") or ""
+    if _FFPROBE is None:
+        _FFPROBE = _find_binary("ffprobe") or ""
 
 def _probe_codec(video_path: str) -> str | None:
     """用 ffprobe 检测视频编码。"""
+    _ensure_ffmpeg()
+    if not _FFPROBE:
+        logger.warning("ffprobe 不可用，跳过编码检测")
+        return None
     try:
         ret = subprocess.run(
             [_FFPROBE, "-v", "error", "-select_streams", "v:0",
@@ -148,9 +174,11 @@ def _probe_codec(video_path: str) -> str | None:
             capture_output=True, text=True, timeout=30,
         )
         if ret.returncode == 0:
-            return ret.stdout.strip().lower()
-    except Exception:
-        pass
+            codec = ret.stdout.strip().lower()
+            if codec:
+                return codec
+    except Exception as e:
+        logger.warning("ffprobe 检测失败: %s", e)
     return None
 
 
@@ -171,10 +199,21 @@ def _ensure_h264(video_path: Path) -> Path:
     codec = _probe_codec(str(video_path))
     logger.info("视频编码检测: %s → codec=%s", video_path.name, codec)
 
-    if codec and codec in _BROWSER_COMPATIBLE_CODECS:
+    if codec is None:
+        # ffprobe 检测失败 — 跳过转码，直接返回原文件让浏览器尝试
+        logger.warning("编码检测失败，跳过转码: %s", video_path.name)
+        return video_path
+
+    if codec in _BROWSER_COMPATIBLE_CODECS:
         return video_path  # 已兼容，直接返回
 
-    # 需要转码
+    # 需要转码 — 先检查 ffmpeg 是否可用
+    _ensure_ffmpeg()
+    if not _FFMPEG:
+        logger.error("ffmpeg 不可用，无法转码 %s (codec=%s)", video_path.name, codec)
+        return video_path
+
+    # 转码
     transcoded_dir = video_path.parent / "_transcoded"
     transcoded_dir.mkdir(parents=True, exist_ok=True)
     transcoded_path = transcoded_dir / video_path.name
@@ -360,11 +399,16 @@ async def check_video_codec(filename: str):
     transcoded_path = video_path.parent / "_transcoded" / video_path.name
     has_transcoded = transcoded_path.exists() and transcoded_path.stat().st_mtime >= video_path.stat().st_mtime
 
+    # ffmpeg 可用性
+    _ensure_ffmpeg()
+
     return {
         "filename": filename,
         "codec": codec,
         "browser_compatible": compatible,
         "has_transcoded_cache": has_transcoded,
+        "ffmpeg_available": bool(_FFMPEG),
+        "ffprobe_available": bool(_FFPROBE),
     }
 
 
