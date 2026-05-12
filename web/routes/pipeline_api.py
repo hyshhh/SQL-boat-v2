@@ -134,12 +134,14 @@ def _safe_filename(filename: str) -> str:
 # ── 视频编码检测与转码 ──
 
 _BROWSER_COMPATIBLE_CODECS = {"h264", "vp8", "vp9", "av1", "mpeg4part10"}
+_FFMPEG = "/usr/bin/ffmpeg"
+_FFPROBE = "/usr/bin/ffprobe"
 
 def _probe_codec(video_path: str) -> str | None:
     """用 ffprobe 检测视频编码。"""
     try:
         ret = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name",
              "-of", "default=noprint_wrappers=1:nokey=1", video_path],
             capture_output=True, text=True, timeout=30,
@@ -184,7 +186,7 @@ def _ensure_h264(video_path: Path) -> Path:
     logger.info("视频编码 %s 不兼容浏览器，转码为 H264: %s → %s", codec, video_path.name, transcoded_path)
     try:
         ret = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(video_path),
+            [_FFMPEG, "-y", "-i", str(video_path),
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "128k",

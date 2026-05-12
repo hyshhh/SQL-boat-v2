@@ -361,12 +361,15 @@ class ShipPipeline:
 
     # ── H265/H264 转码 ────────────────────────
 
+    _FFMPEG = "/usr/bin/ffmpeg"
+    _FFPROBE = "/usr/bin/ffprobe"
+
     @staticmethod
     def _probe_video_codec(video_path: str) -> str | None:
         """用 ffprobe 检测视频编码格式，返回 codec_name（如 'hevc', 'h264' 等）。"""
         try:
             ret = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                [ShipPipeline._FFPROBE, "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=codec_name",
                  "-of", "default=noprint_wrappers=1:nokey=1", video_path],
                 capture_output=True, text=True, timeout=30,
@@ -394,7 +397,7 @@ class ShipPipeline:
         """将视频转码为 H264（浏览器兼容）。"""
         try:
             ret = subprocess.run(
-                ["ffmpeg", "-y", "-i", source_path,
+                [ShipPipeline._FFMPEG, "-y", "-i", source_path,
                  "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                  "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-b:a", "128k",
@@ -415,7 +418,7 @@ class ShipPipeline:
         """将视频转码为 H265。"""
         try:
             ret = subprocess.run(
-                ["ffmpeg", "-y", "-i", source_path,
+                [ShipPipeline._FFMPEG, "-y", "-i", source_path,
                  "-c:v", "libx265", "-preset", "fast", "-crf", "28",
                  "-tag:v", "hvc1",
                  "-pix_fmt", "yuv420p",
