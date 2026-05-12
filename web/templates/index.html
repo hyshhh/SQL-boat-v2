@@ -74,10 +74,8 @@
   <!-- Tab 2: 视频 Demo -->
   <!-- ═══════════════════════════════════════════ -->
   <div class="tab-content" id="tab-video-demo">
-    <div class="demo-layout">
-
-      <!-- ── 左栏：视频播放 + 控制 ── -->
-      <div class="demo-main">
+    <div class="demo-layout" style="display:flex;gap:20px;align-items:flex-start">
+      <div class="demo-main" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:20px">
 
         <!-- Pipeline 控制 + 播放（合并为一个卡片） -->
         <div class="section-card" id="pipelineControl" style="display:none">
@@ -117,7 +115,7 @@
       </div>
 
       <!-- ── 右栏：配置 + 视频列表 ── -->
-      <div class="demo-sidebar">
+      <div class="demo-sidebar" style="width:340px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
 
         <!-- 上传区 -->
         <div class="section-card">
