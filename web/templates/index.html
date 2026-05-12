@@ -193,19 +193,12 @@
         <span id="pipelineStatusText">等待开始</span>
       </div>
 
-      <!-- 视频对比播放 -->
-      <div class="video-compare">
-        <div class="video-box">
-          <h4>原始视频</h4>
-          <video id="sourceVideo" controls class="demo-video"></video>
-        </div>
-        <div class="video-box">
-          <h4>处理结果</h4>
-          <video id="resultVideo" controls class="demo-video" onerror="showToast('视频加载失败，可能编码格式不支持','error')"></video>
-          <div id="resultPlaceholder" class="video-placeholder">
-            <span>🎬</span>
-            <p>处理完成后在此播放结果</p>
-          </div>
+      <!-- 实时预览 -->
+      <div class="result-area">
+        <h4>处理结果</h4>
+        <div id="resultPlaceholder" class="video-placeholder">
+          <span>🎬</span>
+          <p>点击"开始处理"后实时显示识别结果</p>
         </div>
       </div>
     </div>
@@ -349,8 +342,6 @@
       <div id="cameraOutput" class="camera-output">
         <!-- MJPEG 实时流：用 img 标签接收 multipart/x-mixed-replace -->
         <img id="cameraStream" class="demo-video" style="display:none;max-width:100%;border-radius:8px;background:#000" alt="摄像头实时画面" />
-        <!-- 处理结果视频 -->
-        <video id="cameraResultVideo" controls class="demo-video" style="display:none" onerror="showToast('视频加载失败','error')"></video>
         <div id="cameraStreamPlaceholder" class="video-placeholder">
           <span>📷</span>
           <p>启动后显示实时画面</p>

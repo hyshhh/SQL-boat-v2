@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frames-dir", default=None, help="帧目录模式：从指定目录读取 latest.jpg（浏览器摄像头推流）")
     parser.add_argument("--virtual-fps", type=float, default=15.0, help="帧目录模式的虚拟帧率 (默认 15)")
     parser.add_argument("--stream-dir", default=None, help="将每帧标注结果以 latest.jpg 写入此目录（供 MJPEG 流读取）")
+    parser.add_argument("--no-output", action="store_true", help="不保存输出视频文件（仅实时推流）")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志输出")
 
     return parser
@@ -86,6 +87,8 @@ def _merge_args_to_config(args, config: dict) -> dict:
         config["pipeline"]["enable_refresh"] = not args.no_refresh
     if args.gap_num is not None:
         config["pipeline"]["gap_num"] = max(1, args.gap_num)
+    if args.no_output:
+        config["pipeline"]["no_output"] = True
     return config
 
 

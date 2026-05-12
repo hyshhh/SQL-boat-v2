@@ -1,12 +1,8 @@
 /**
- * Pipeline 前端逻辑 — 视频 Demo / 摄像头 Demo（修复版）
+ * Pipeline 前端逻辑 — 视频 Demo / 摄像头 Demo
  *
- * 修复内容：
- * 1. selectVideo 的 event 未传入问题
- * 2. 摄像头输入不经过 _safe_filename 和文件存在检查
- * 3. 摄像头实时流显示（MJPEG）
- * 4. Pipeline 处理期间实时进度显示
- * 5. Tab 切换时正确初始化
+ * 视频 Demo：后端推理，实时 MJPEG 推流到前端，不保存输出视频
+ * 摄像头 Demo：浏览器/服务器摄像头，实时推流识别
  */
 
 const PIPE_API = '/api/pipeline';
@@ -24,7 +20,7 @@ function switchTab(tabName) {
     loadVideoList();
     loadTaskHistory();
   } else if (tabName === 'camera-demo') {
-    onCameraSourceChange(); // 初始化摄像头输入框状态
+    onCameraSourceChange();
   } else if (tabName === 'database') {
     if (typeof loadShips === 'function') loadShips();
   }
@@ -147,7 +143,6 @@ async function loadVideoList() {
           <div class="video-item-meta">${v.size_mb} MB</div>
         </div>
         <div class="video-item-actions">
-          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); playSourceVideo(this.dataset.name)" data-name="${safeAttr(v.filename)}">▶ 预览</button>
           <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteVideo(this.dataset.name)" data-name="${safeAttr(v.filename)}">🗑️</button>
         </div>
       </div>
@@ -157,7 +152,6 @@ async function loadVideoList() {
   }
 }
 
-// 修复：接收 event.currentTarget 作为参数
 function selectVideo(filename, el) {
   selectedVideo = filename;
   document.getElementById('pipelineControl').style.display = '';
@@ -165,72 +159,13 @@ function selectVideo(filename, el) {
   document.querySelectorAll('.video-item').forEach(item => item.classList.remove('selected'));
   if (el) el.classList.add('selected');
 
-  // 重置源视频（停止旧视频播放）
-  const sourceVideo = document.getElementById('sourceVideo');
-  if (sourceVideo) {
-    sourceVideo.pause();
-    sourceVideo.removeAttribute('src');
-    sourceVideo.load();
+  // 重置结果区域
+  const resultPlaceholder = document.getElementById('resultPlaceholder');
+  if (resultPlaceholder) {
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
+    resultPlaceholder.style.display = '';
   }
-
-  // 加载源视频
-  playSourceVideo(filename);
-  // 重置结果
-  document.getElementById('resultVideo').style.display = 'none';
-  document.getElementById('resultPlaceholder').style.display = '';
   resetPipelineStatus();
-}
-
-function playSourceVideo(filename) {
-  // 关键修复：设置 selectedVideo，确保后续 pipeline 启动能找到视频
-  selectedVideo = filename;
-
-  const video = document.getElementById('sourceVideo');
-  if (!video) return;
-
-  // 更新视频列表选中状态（预览按钮直接调用时也需要高亮）
-  document.querySelectorAll('.video-item').forEach(item => {
-    const nameEl = item.querySelector('.video-item-name');
-    item.classList.toggle('selected', nameEl && nameEl.textContent === filename);
-  });
-
-  // 确保 pipelineControl 可见
-  document.getElementById('pipelineControl').style.display = '';
-
-  // 先检测编码兼容性
-  const videoUrl = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
-  fetch(`${PIPE_API}/videos/${encodeURIComponent(filename)}/codec`)
-    .then(resp => resp.json())
-    .then(info => {
-      if (!info.browser_compatible && !info.has_transcoded_cache) {
-        // 需要转码，显示提示并触发异步转码
-        showToast(`视频编码 ${info.codec} 不兼容浏览器，正在自动转码为 H264…`, 'info');
-        fetch(`${PIPE_API}/videos/${encodeURIComponent(filename)}/transcode`, { method: 'POST' })
-          .then(r => r.json())
-          .then(result => {
-            if (result.success) {
-              showToast('✅ 转码完成，正在加载视频…');
-              video.src = videoUrl;
-              video.load();
-              video.play().catch(() => {});
-            } else {
-              showToast('转码失败: ' + (result.message || '未知错误'), 'error');
-            }
-          })
-          .catch(err => showToast('转码请求失败: ' + err.message, 'error'));
-      } else {
-        // 已兼容或有缓存，直接播放
-        video.src = videoUrl;
-        video.load();
-        video.play().catch(() => {});
-      }
-    })
-    .catch(() => {
-      // 检测失败，直接尝试播放
-      video.src = videoUrl;
-      video.load();
-      video.play().catch(() => {});
-    });
 }
 
 async function deleteVideo(filename) {
@@ -312,13 +247,8 @@ async function startVideoPipeline() {
     document.getElementById('btnStartPipeline').style.display = 'none';
     document.getElementById('btnStopPipeline').style.display = '';
 
-    // 实时预览：显示 MJPEG 流
-    const resultVideo = document.getElementById('resultVideo');
+    // 实时预览：显示 MJPEG 推流
     const resultPlaceholder = document.getElementById('resultPlaceholder');
-    if (resultVideo) {
-      resultVideo.style.display = 'none';
-    }
-    // 复用 resultPlaceholder 区域显示实时流
     if (resultPlaceholder) {
       resultPlaceholder.innerHTML = `<img id="livePreview" src="${PIPE_API}/stream/${currentTaskId}" style="max-width:100%;border-radius:8px;background:#000" alt="实时预览" />`;
       resultPlaceholder.style.display = '';
@@ -337,14 +267,14 @@ async function stopVideoPipeline() {
   if (!currentTaskId) return;
   const taskId = currentTaskId;
 
-  // 先清除 MJPEG 实时预览（停止 img 标签对后端 stream 的持续请求）
+  // 清除 MJPEG 实时预览（停止 img 标签对后端 stream 的持续请求）
   const livePreview = document.getElementById('livePreview');
   if (livePreview) {
     livePreview.src = '';
     livePreview.remove();
   }
 
-  // 立即更新 UI 状态
+  // 更新 UI 状态
   updatePipelineStatus('failed', '正在停止...');
   resetPipelineButtons();
 
@@ -363,7 +293,7 @@ async function stopVideoPipeline() {
   // 恢复结果占位
   const resultPlaceholder = document.getElementById('resultPlaceholder');
   if (resultPlaceholder) {
-    resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
   }
 
   stopStatusPolling();
@@ -388,7 +318,6 @@ async function pollTaskStatus() {
   try {
     const resp = await fetch(`${PIPE_API}/status/${currentTaskId}`);
     if (resp.status === 404) {
-      // 任务已被清理，停止轮询
       stopStatusPolling();
       resetPipelineButtons();
       currentTaskId = null;
@@ -401,25 +330,21 @@ async function pollTaskStatus() {
       stopStatusPolling();
       resetPipelineButtons();
       showToast('✅ 处理完成!');
-      // 清除实时预览
+      // 恢复占位
       const resultPlaceholder = document.getElementById('resultPlaceholder');
       if (resultPlaceholder) {
-        resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
-      }
-      if (data.output_filename) {
-        loadResultVideo(data.output_filename);
+        resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
       }
       loadTaskHistory();
       currentTaskId = null;
     } else if (data.status === 'failed') {
       stopStatusPolling();
       resetPipelineButtons();
-      // 清除实时预览
+      // 恢复占位
       const resultPlaceholder = document.getElementById('resultPlaceholder');
       if (resultPlaceholder) {
-        resultPlaceholder.innerHTML = '<span>🎬</span><p>处理完成后在此播放结果</p>';
+        resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
       }
-      // 区分用户手动停止和真正失败
       const errorMsg = data.error || '未知错误';
       if (errorMsg === '用户手动停止') {
         showToast('已停止', 'info');
@@ -476,11 +401,9 @@ async function loadTaskHistory() {
             <div class="task-name">${escHtml(t.video_filename)}${cameraTag}</div>
             <div class="task-meta">
               任务 ${escHtml(t.task_id)} · ${escHtml(t.progress || t.error || t.status)}
-              ${t.output_filename ? ' · 输出: ' + escHtml(t.output_filename) : ''}
             </div>
           </div>
           <div class="task-actions">
-            ${t.status === 'completed' && t.output_filename ? `<button class="btn btn-outline btn-sm" onclick="playResultVideo(this.dataset.name)" data-name="${safeAttr(t.output_filename)}">▶ 播放</button>` : ''}
             ${t.status === 'running' ? `<button class="btn btn-danger btn-sm" onclick="stopTaskById(this.dataset.id)" data-id="${safeAttr(t.task_id)}">⏹ 停止</button>` : ''}
           </div>
         </div>
@@ -489,38 +412,6 @@ async function loadTaskHistory() {
   } catch (e) {
     container.innerHTML = `<div class="empty-msg">加载失败: ${e.message}</div>`;
   }
-}
-
-function playResultVideo(filename) {
-  switchTab('video-demo');
-  loadResultVideo(filename);
-  document.getElementById('pipelineControl').style.display = '';
-}
-
-/** 加载结果视频，带错误处理 */
-function loadResultVideo(filename) {
-  const resultVideo = document.getElementById('resultVideo');
-  const resultPlaceholder = document.getElementById('resultPlaceholder');
-  if (!resultVideo) return;
-
-  const url = `${PIPE_API}/outputs/${encodeURIComponent(filename)}`;
-
-  // 先隐藏视频，显示占位符
-  resultVideo.style.display = 'none';
-  if (resultPlaceholder) resultPlaceholder.style.display = '';
-
-  // 直接设置 src，通过 onerror 检测加载失败
-  resultVideo.onerror = function () {
-    showToast('结果视频加载失败: ' + filename, 'error');
-    resultVideo.style.display = 'none';
-    if (resultPlaceholder) resultPlaceholder.style.display = '';
-  };
-  resultVideo.onloadeddata = function () {
-    resultVideo.style.display = '';
-    if (resultPlaceholder) resultPlaceholder.style.display = 'none';
-  };
-  resultVideo.src = url;
-  resultVideo.load();
 }
 
 async function stopTaskById(taskId) {
@@ -560,7 +451,6 @@ function onCameraSourceChange() {
     }
   }
 
-  // 显示/隐藏浏览器预览
   if (previewRow) {
     previewRow.style.display = val === 'browser' ? '' : 'none';
   }
@@ -582,7 +472,6 @@ async function startBrowserCamera() {
   btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
 
   try {
-    // 1. 获取浏览器摄像头（需要 HTTPS 或 localhost）
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('当前页面不是安全上下文（需要 HTTPS 或 localhost），浏览器不允许访问摄像头');
     }
@@ -597,7 +486,6 @@ async function startBrowserCamera() {
     });
     browserCameraStream = stream;
 
-    // 显示本地预览
     const preview = document.getElementById('browserCameraPreview');
     const placeholder = document.getElementById('browserCameraPreviewPlaceholder');
     if (preview) {
@@ -606,7 +494,6 @@ async function startBrowserCamera() {
     }
     if (placeholder) placeholder.style.display = 'none';
 
-    // 2. 启动后端 Pipeline
     const resp = await fetch(`${PIPE_API}/start-browser-camera`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -620,7 +507,6 @@ async function startBrowserCamera() {
 
     cameraTaskId = data.task_id;
 
-    // 3. 建立 WebSocket 推流（提取为函数，支持重连复用）
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
 
@@ -632,7 +518,6 @@ async function startBrowserCamera() {
         document.getElementById('btnStartCamera').style.display = 'none';
         document.getElementById('btnStopCamera').style.display = '';
 
-        // 设置 MJPEG 实时流画面
         const cameraStream = document.getElementById('cameraStream');
         const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
         if (cameraStream) {
@@ -641,7 +526,6 @@ async function startBrowserCamera() {
           if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
         }
 
-        // 开始捕获帧（传入当前 ws 实例）
         startFrameCapture(ws, stream);
         startCameraPolling();
       };
@@ -653,20 +537,17 @@ async function startBrowserCamera() {
         } catch {}
       };
 
-      ws.onerror = () => {
-        console.warn('WebSocket 错误');
-      };
+      ws.onerror = () => { console.warn('WebSocket 错误'); };
 
       ws.onclose = (evt) => {
         if (!cameraTaskId) return;
-        console.warn('WebSocket 断开, code:', evt.code);
         if (evt.code !== 1000 && cameraTaskId) {
           showToast('摄像头连接断开，尝试重连…', 'info');
           setTimeout(() => {
             if (!cameraTaskId) return;
             const newWs = new WebSocket(wsUrl);
             browserCameraWs = newWs;
-            setupWsHandlers(newWs);  // 递归设置，新 ws 实例正确传入
+            setupWsHandlers(newWs);
           }, 2000);
         }
       };
@@ -689,7 +570,7 @@ function startFrameCapture(ws, stream) {
   const video = document.getElementById('browserCameraPreview');
   if (!video) return;
 
-  let sending = false;  // 防止 toBlob 重入
+  let sending = false;
 
   const doCapture = () => {
     if (!browserCameraCanvas) {
@@ -712,7 +593,7 @@ function startFrameCapture(ws, stream) {
         }
         sending = false;
       }, 'image/jpeg', 0.7);
-    }, 66); // ~15fps
+    }, 66);
   };
 
   if (video.readyState >= 2) {
@@ -748,7 +629,6 @@ function stopFrameCapture() {
 async function startCameraPipeline() {
   const input = getCameraInput();
 
-  // 浏览器摄像头走独立流程
   if (input === '__browser__') {
     await startBrowserCamera();
     return;
@@ -761,14 +641,13 @@ async function startCameraPipeline() {
   btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
 
   try {
-    // 构造摄像头标识符
     let videoFilename;
     if (input === '0') {
       videoFilename = '__camera__0';
     } else if (input.startsWith('rtsp://') || input.startsWith('rtmp://') || input.startsWith('http://')) {
-      videoFilename = input;  // 直接传 URL，后端识别
+      videoFilename = input;
     } else {
-      videoFilename = input;  // 自定义路径
+      videoFilename = input;
     }
 
     const resp = await fetch(`${PIPE_API}/start`, {
@@ -790,7 +669,6 @@ async function startCameraPipeline() {
     document.getElementById('btnStopCamera').style.display = '';
     showToast('摄像头 Pipeline 已启动');
 
-    // 设置 MJPEG 实时流画面
     const cameraStream = document.getElementById('cameraStream');
     const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
     if (cameraStream) {
@@ -809,32 +687,25 @@ async function startCameraPipeline() {
 }
 
 async function stopCameraPipeline() {
-  // 1. 先停止浏览器摄像头推流
   stopFrameCapture();
 
   const taskId = cameraTaskId;
 
-  // 2. 先清除 MJPEG 实时流（停止 img 标签对后端 stream 的持续请求）
   const cameraStream = document.getElementById('cameraStream');
   if (cameraStream) {
     cameraStream.src = '';
   }
 
-  // 3. 立即更新 UI
   stopCameraPolling();
   updateCameraStatus('idle', '正在停止...');
   resetCameraButtons();
 
-  // 4. 发送停止请求到后端
   if (taskId) {
     try {
       await fetch(`${PIPE_API}/stop/${taskId}`, { method: 'POST' });
-    } catch {
-      // 忽略网络错误
-    }
+    } catch {}
   }
 
-  // 5. 清除结果视频
   const cameraResultVideo = document.getElementById('cameraResultVideo');
   const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
   if (cameraStream) {
@@ -867,7 +738,6 @@ async function pollCameraStatus() {
   try {
     const resp = await fetch(`${PIPE_API}/status/${cameraTaskId}`);
     if (resp.status === 404) {
-      // 任务已被清理
       stopCameraPolling();
       resetCameraButtons();
       cameraTaskId = null;
@@ -881,26 +751,6 @@ async function pollCameraStatus() {
       resetCameraButtons();
       if (data.status === 'completed') {
         showToast('✅ 摄像头处理完成');
-        // 切换到结果视频
-        if (data.output_filename) {
-          const cameraStream = document.getElementById('cameraStream');
-          const cameraResultVideo = document.getElementById('cameraResultVideo');
-          const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
-          // 隐藏 MJPEG 流
-          if (cameraStream) {
-            cameraStream.src = '';
-            cameraStream.style.display = 'none';
-          }
-          if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
-          // 加载结果视频
-          if (cameraResultVideo) {
-            const url = `${PIPE_API}/outputs/${encodeURIComponent(data.output_filename)}`;
-            cameraResultVideo.onerror = () => showToast('结果视频加载失败', 'error');
-            cameraResultVideo.src = url;
-            cameraResultVideo.style.display = '';
-            cameraResultVideo.load();
-          }
-        }
       } else if (data.status === 'failed') {
         const errorMsg = data.error || '未知错误';
         if (errorMsg === '用户手动停止') {

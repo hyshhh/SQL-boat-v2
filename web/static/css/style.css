@@ -359,6 +359,13 @@ tbody tr:hover { background: #f8f9fb; }
   border-radius: var(--radius);
   background: #000;
 }
+/* ── 结果区域 ── */
+.result-area h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
 .video-placeholder {
   display: flex;
   flex-direction: column;

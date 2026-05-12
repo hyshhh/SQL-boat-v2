@@ -518,8 +518,10 @@ class ShipPipeline:
             frame_writer = ShipPipeline._FrameWriter(stream_path, quality=70)
             logger.info("MJPEG 帧输出: %s", stream_path / "latest.jpg")
 
+        no_output = self._config.get("pipeline", {}).get("no_output", False)
+
         try:
-            if output_path:
+            if output_path and not no_output:
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 video_writer = cv2.VideoWriter(output_path, fourcc, input_src.source_fps, (input_src.width, input_src.height))
                 if not video_writer.isOpened():

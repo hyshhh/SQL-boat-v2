@@ -500,7 +500,6 @@ async def start_pipeline(req: PipelineStartRequest):
 
     is_camera = _is_camera_input(req.video_filename)
     task_id = str(uuid.uuid4())[:8]
-    output_dir = _get_output_dir()
 
     if is_camera:
         video_source = req.video_filename
@@ -513,10 +512,7 @@ async def start_pipeline(req: PipelineStartRequest):
         if video_path is None or not video_path.exists():
             raise HTTPException(status_code=404, detail=f"视频不存在: {req.video_filename}")
         video_source = str(video_path)
-        stem = Path(req.video_filename).stem
-        output_filename = f"{stem}_result_{task_id}.mp4"
-
-    output_path = output_dir / output_filename
+        output_filename = None  # 不保存输出视频
 
     # 构建 pipeline 命令
     config = load_config()
@@ -525,7 +521,7 @@ async def start_pipeline(req: PipelineStartRequest):
     cmd = [
         sys.executable, "-m", "pipeline",
         video_source,
-        "--output", str(output_path),
+        "--no-output",  # 不保存输出视频，仅实时推流
     ]
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
@@ -569,7 +565,7 @@ async def start_pipeline(req: PipelineStartRequest):
         "status": "running",
         "video_filename": req.video_filename,
         "output_filename": output_filename,
-        "output_path": str(output_path),
+        "output_path": None,
         "progress": "处理中...",
         "error": None,
         "is_camera": is_camera,
@@ -604,7 +600,7 @@ async def _read_stderr(process: asyncio.subprocess.Process) -> bytes:
     return await process.stderr.read()
 
 
-async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str):
+async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str | None):
     """异步等待 pipeline 完成，实时解析进度，带超时保护"""
     # 启动并发 stderr 读取，避免缓冲区满导致死锁
     stderr_task = asyncio.create_task(_read_stderr(process))
@@ -890,9 +886,6 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
     pipeline_cfg = config.get("pipeline", {})
 
     task_id = str(uuid.uuid4())[:8]
-    output_dir = _get_output_dir()
-    output_filename = f"browser_cam_{task_id}.mp4"
-    output_path = output_dir / output_filename
     frames_dir = _get_browser_frames_dir(task_id)
     stream_dir = _get_stream_dir(task_id)
 
@@ -901,7 +894,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         f"browser_camera_{task_id}",
         "--frames-dir", str(frames_dir),
         "--virtual-fps", "15",
-        "--output", str(output_path),
+        "--no-output",  # 不保存输出视频
         "--stream-dir", str(stream_dir),
         "--camera",
         "--demo",
@@ -934,8 +927,8 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         "task_id": task_id,
         "status": "running",
         "video_filename": f"浏览器摄像头 ({task_id})",
-        "output_filename": output_filename,
-        "output_path": str(output_path),
+        "output_filename": None,
+        "output_path": None,
         "progress": "等待摄像头连接...",
         "error": None,
         "is_camera": True,
@@ -961,7 +954,6 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         success=True,
         message=f"浏览器摄像头 Pipeline 已启动，请连接 WebSocket 推流",
         task_id=task_id,
-        output_filename=output_filename,
     )
 
 
