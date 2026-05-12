@@ -13,6 +13,7 @@ output/
 .idea/
 demovid/
 demo_output/
+_transcoded/
 *.mp4
 *.avi
 *.mkv

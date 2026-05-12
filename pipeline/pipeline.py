@@ -362,43 +362,88 @@ class ShipPipeline:
     # ── H265/H264 转码 ────────────────────────
 
     @staticmethod
-    def _transcode_video(source_path: str, target_path: str) -> bool:
-        """
-        尝试 H265 转码，失败则回退 H264。
-        优先 H265 推流，兼容问题时用 H264。
-        """
-        # 尝试 H265
+    def _probe_video_codec(video_path: str) -> str | None:
+        """用 ffprobe 检测视频编码格式，返回 codec_name（如 'hevc', 'h264' 等）。"""
+        try:
+            ret = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name",
+                 "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if ret.returncode == 0:
+                codec = ret.stdout.strip().lower()
+                logger.info("视频编码检测: %s → %s", video_path, codec)
+                return codec
+        except Exception as e:
+            logger.warning("ffprobe 检测失败: %s", e)
+        return None
+
+    @staticmethod
+    def _is_browser_compatible_codec(codec: str | None) -> bool:
+        """判断编码是否被主流浏览器原生支持。"""
+        if codec is None:
+            return False
+        # 浏览器原生支持: h264, vp8, vp9, av1
+        # 不支持: hevc/h265, mpeg4 (mp4v)
+        compatible = {"h264", "vp8", "vp9", "av1", "h264", "mpeg4part10"}
+        return codec in compatible
+
+    @staticmethod
+    def _transcode_to_h264(source_path: str, target_path: str) -> bool:
+        """将视频转码为 H264（浏览器兼容）。"""
+        try:
+            ret = subprocess.run(
+                ["ffmpeg", "-y", "-i", source_path,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                 "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart",
+                 target_path],
+                capture_output=True, timeout=600,
+            )
+            if ret.returncode == 0 and Path(target_path).exists() and Path(target_path).stat().st_size > 0:
+                logger.info("H264 转码成功: %s", target_path)
+                return True
+            logger.warning("H264 转码失败: %s", ret.stderr.decode()[-300:] if ret.stderr else "")
+        except Exception as e:
+            logger.warning("H264 转码异常: %s", e)
+        return False
+
+    @staticmethod
+    def _transcode_to_h265(source_path: str, target_path: str) -> bool:
+        """将视频转码为 H265。"""
         try:
             ret = subprocess.run(
                 ["ffmpeg", "-y", "-i", source_path,
                  "-c:v", "libx265", "-preset", "fast", "-crf", "28",
                  "-tag:v", "hvc1",
-                 "-c:a", "copy", target_path],
-                capture_output=True, timeout=300,
+                 "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart",
+                 target_path],
+                capture_output=True, timeout=600,
             )
             if ret.returncode == 0 and Path(target_path).exists() and Path(target_path).stat().st_size > 0:
                 logger.info("H265 转码成功: %s", target_path)
                 return True
-            logger.warning("H265 转码失败，尝试 H264: %s", ret.stderr.decode()[-200:] if ret.stderr else "")
+            logger.warning("H265 转码失败: %s", ret.stderr.decode()[-300:] if ret.stderr else "")
         except Exception as e:
-            logger.warning("H265 转码异常: %s，尝试 H264", e)
-
-        # 回退 H264
-        try:
-            ret = subprocess.run(
-                ["ffmpeg", "-y", "-i", source_path,
-                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                 "-c:a", "copy", target_path],
-                capture_output=True, timeout=300,
-            )
-            if ret.returncode == 0 and Path(target_path).exists() and Path(target_path).stat().st_size > 0:
-                logger.info("H264 转码成功: %s", target_path)
-                return True
-            logger.warning("H264 转码也失败: %s", ret.stderr.decode()[-200:] if ret.stderr else "")
-        except Exception as e:
-            logger.warning("H264 转码异常: %s", e)
-
+            logger.warning("H265 转码异常: %s", e)
         return False
+
+    @staticmethod
+    def _transcode_video(source_path: str, target_path: str) -> bool:
+        """
+        转码视频，优先 H264（浏览器兼容），其次 H265。
+        浏览器兼容性优先于压缩率。
+        """
+        # 优先 H264 — 浏览器全平台兼容
+        if ShipPipeline._transcode_to_h264(source_path, target_path):
+            return True
+        logger.warning("H264 转码失败，尝试 H265")
+        # 回退 H265
+        return ShipPipeline._transcode_to_h265(source_path, target_path)
 
     # ── 主流程 ────────────────────────────────
 

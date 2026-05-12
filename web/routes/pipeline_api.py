@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -128,6 +129,78 @@ def _safe_filename(filename: str) -> str:
     if not name or name.startswith('.') or '..' in name:
         raise HTTPException(status_code=400, detail="无效的文件名")
     return name
+
+
+# ── 视频编码检测与转码 ──
+
+_BROWSER_COMPATIBLE_CODECS = {"h264", "vp8", "vp9", "av1", "mpeg4part10"}
+
+def _probe_codec(video_path: str) -> str | None:
+    """用 ffprobe 检测视频编码。"""
+    try:
+        ret = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ret.returncode == 0:
+            return ret.stdout.strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+def _is_browser_compatible(video_path: str) -> bool:
+    """检测视频是否被浏览器原生兼容。"""
+    codec = _probe_codec(video_path)
+    if codec is None:
+        return True  # 检测失败时假设兼容，避免不必要的转码
+    return codec in _BROWSER_COMPATIBLE_CODECS
+
+
+def _ensure_h264(video_path: Path) -> Path:
+    """
+    确保视频为浏览器兼容的 H264 编码。
+    如果不是，自动转码并缓存到 _transcoded/ 目录。
+    返回可播放的视频路径。
+    """
+    codec = _probe_codec(str(video_path))
+    logger.info("视频编码检测: %s → codec=%s", video_path.name, codec)
+
+    if codec and codec in _BROWSER_COMPATIBLE_CODECS:
+        return video_path  # 已兼容，直接返回
+
+    # 需要转码
+    transcoded_dir = video_path.parent / "_transcoded"
+    transcoded_dir.mkdir(parents=True, exist_ok=True)
+    transcoded_path = transcoded_dir / video_path.name
+
+    # 如果已转码过且比源文件新，直接使用
+    if transcoded_path.exists() and transcoded_path.stat().st_mtime >= video_path.stat().st_mtime:
+        logger.info("使用已缓存的转码文件: %s", transcoded_path)
+        return transcoded_path
+
+    logger.info("视频编码 %s 不兼容浏览器，转码为 H264: %s → %s", codec, video_path.name, transcoded_path)
+    try:
+        ret = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path),
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+             "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k",
+             "-movflags", "+faststart",
+             str(transcoded_path)],
+            capture_output=True, timeout=600,
+        )
+        if ret.returncode == 0 and transcoded_path.exists() and transcoded_path.stat().st_size > 0:
+            logger.info("转码成功: %s (%.1f MB)", transcoded_path.name, transcoded_path.stat().st_size / 1024 / 1024)
+            return transcoded_path
+        logger.error("转码失败: %s", ret.stderr.decode()[-300:] if ret.stderr else "未知错误")
+    except Exception as e:
+        logger.error("转码异常: %s", e)
+
+    # 转码失败，返回原文件（浏览器可能无法播放）
+    return video_path
 
 
 def _is_camera_input(video_filename: str) -> bool:
@@ -264,6 +337,60 @@ async def delete_video(filename: str):
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
     video_path.unlink()
     return {"success": True, "message": f"已删除: {filename}"}
+
+
+# ── 视频编码检测 ──
+
+@router.get("/videos/{filename}/codec")
+async def check_video_codec(filename: str):
+    """检测视频编码格式及浏览器兼容性"""
+    filename = _safe_filename(filename)
+    demo_dir = _get_demo_dir()
+    video_path = demo_dir / filename
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
+
+    codec = _probe_codec(str(video_path))
+    compatible = codec in _BROWSER_COMPATIBLE_CODECS if codec else True
+
+    # 检查是否有已转码的缓存
+    transcoded_path = video_path.parent / "_transcoded" / video_path.name
+    has_transcoded = transcoded_path.exists() and transcoded_path.stat().st_mtime >= video_path.stat().st_mtime
+
+    return {
+        "filename": filename,
+        "codec": codec,
+        "browser_compatible": compatible,
+        "has_transcoded_cache": has_transcoded,
+    }
+
+
+@router.post("/videos/{filename}/transcode")
+async def transcode_video(filename: str):
+    """手动触发视频转码为 H264（浏览器兼容）"""
+    filename = _safe_filename(filename)
+    demo_dir = _get_demo_dir()
+    video_path = demo_dir / filename
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
+
+    codec = _probe_codec(str(video_path))
+    if codec and codec in _BROWSER_COMPATIBLE_CODECS:
+        return {"success": True, "message": f"视频已是浏览器兼容格式 ({codec})，无需转码", "codec": codec}
+
+    # 异步转码
+    result_path = await asyncio.to_thread(_ensure_h264, video_path)
+    if result_path == video_path:
+        raise HTTPException(status_code=500, detail="转码失败，请检查 ffmpeg 是否可用")
+
+    new_codec = _probe_codec(str(result_path))
+    return {
+        "success": True,
+        "message": f"转码完成: {codec} → {new_codec}",
+        "original_codec": codec,
+        "new_codec": new_codec,
+        "cached_path": str(result_path),
+    }
 
 
 # ── Pipeline 控制 ──
@@ -752,8 +879,8 @@ async def list_outputs():
 
 
 @router.get("/outputs/{filename}")
-async def get_output_video(filename: str):
-    """下载/播放输出视频"""
+async def get_output_video(request: Request, filename: str):
+    """下载/播放输出视频（自动转码 + Range 支持）"""
     filename = _safe_filename(filename)
     output_dir = _get_output_dir()
     video_path = output_dir / filename
@@ -763,31 +890,137 @@ async def get_output_video(filename: str):
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
 
+    # 自动转码不兼容的编码为 H264
+    video_path = await asyncio.to_thread(_ensure_h264, video_path)
+
     ext = video_path.suffix.lower()
     mime_map = {
         ".mp4": "video/mp4", ".avi": "video/x-msvideo",
         ".mkv": "video/x-matroska", ".mov": "video/quicktime",
         ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".webm": "video/webm",
     }
-    return FileResponse(path=str(video_path), media_type=mime_map.get(ext, "video/mp4"), filename=filename)
+    media_type = mime_map.get(ext, "video/mp4")
+
+    # 支持 Range 请求
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        try:
+            ranges = range_header.replace("bytes=", "").split("-")
+            start = int(ranges[0]) if ranges[0] else 0
+            end = int(ranges[1]) if ranges[1] else file_size - 1
+            end = min(end, file_size - 1)
+
+            if start >= file_size:
+                raise HTTPException(status_code=416, detail="Range 不满足")
+
+            content_length = end - start + 1
+
+            def ranged_file():
+                with open(video_path, "rb") as f:
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+
+            return StreamingResponse(
+                ranged_file(),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(content_length),
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                },
+            )
+        except (ValueError, IndexError):
+            pass
+
+    return FileResponse(
+        path=str(video_path),
+        media_type=media_type,
+        filename=filename,
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 @router.get("/video/{filename}")
-async def get_source_video(filename: str):
-    """获取源视频用于播放"""
+async def get_source_video(request: Request, filename: str):
+    """获取源视频用于播放（自动转码 HEVC → H264，支持 Range 请求）"""
     filename = _safe_filename(filename)
     demo_dir = _get_demo_dir()
     video_path = demo_dir / filename
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
 
+    # 自动转码不兼容的编码（如 H265/HEVC）为 H264
+    video_path = await asyncio.to_thread(_ensure_h264, video_path)
+
     ext = video_path.suffix.lower()
     mime_map = {
         ".mp4": "video/mp4", ".avi": "video/x-msvideo",
         ".mkv": "video/x-matroska", ".mov": "video/quicktime",
         ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".webm": "video/webm",
     }
-    return FileResponse(path=str(video_path), media_type=mime_map.get(ext, "video/mp4"), filename=filename)
+    media_type = mime_map.get(ext, "video/mp4")
+
+    # 支持 Range 请求（视频拖拽/seek）
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        # 解析 Range: bytes=start-end
+        try:
+            ranges = range_header.replace("bytes=", "").split("-")
+            start = int(ranges[0]) if ranges[0] else 0
+            end = int(ranges[1]) if ranges[1] else file_size - 1
+            end = min(end, file_size - 1)
+
+            if start >= file_size:
+                raise HTTPException(status_code=416, detail="Range 不满足")
+
+            content_length = end - start + 1
+
+            def ranged_file():
+                with open(video_path, "rb") as f:
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+
+            return StreamingResponse(
+                ranged_file(),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(content_length),
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                },
+            )
+        except (ValueError, IndexError):
+            pass
+
+    # 无 Range — 返回完整文件
+    return FileResponse(
+        path=str(video_path),
+        media_type=media_type,
+        filename=filename,
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 # ── 清理历史 ──

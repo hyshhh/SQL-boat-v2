@@ -188,12 +188,40 @@ function playSourceVideo(filename) {
   // 确保 pipelineControl 可见
   document.getElementById('pipelineControl').style.display = '';
 
-  // 设置视频源并尝试自动播放
-  video.src = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
-  video.load();
-  video.play().catch(() => {
-    // 浏览器可能阻止自动播放，用户可手动点击播放
-  });
+  // 先检测编码兼容性
+  const videoUrl = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
+  fetch(`${PIPE_API}/videos/${encodeURIComponent(filename)}/codec`)
+    .then(resp => resp.json())
+    .then(info => {
+      if (!info.browser_compatible && !info.has_transcoded_cache) {
+        // 需要转码，显示提示并触发异步转码
+        showToast(`视频编码 ${info.codec} 不兼容浏览器，正在自动转码为 H264…`, 'info');
+        fetch(`${PIPE_API}/videos/${encodeURIComponent(filename)}/transcode`, { method: 'POST' })
+          .then(r => r.json())
+          .then(result => {
+            if (result.success) {
+              showToast('✅ 转码完成，正在加载视频…');
+              video.src = videoUrl;
+              video.load();
+              video.play().catch(() => {});
+            } else {
+              showToast('转码失败: ' + (result.message || '未知错误'), 'error');
+            }
+          })
+          .catch(err => showToast('转码请求失败: ' + err.message, 'error'));
+      } else {
+        // 已兼容或有缓存，直接播放
+        video.src = videoUrl;
+        video.load();
+        video.play().catch(() => {});
+      }
+    })
+    .catch(() => {
+      // 检测失败，直接尝试播放
+      video.src = videoUrl;
+      video.load();
+      video.play().catch(() => {});
+    });
 }
 
 async function deleteVideo(filename) {
