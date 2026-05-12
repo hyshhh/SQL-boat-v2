@@ -366,6 +366,51 @@ class ShipPipeline:
                 else:
                     self._stop.wait(0.005)
 
+    # ── Raw stdout 帧写入器 ────────────────────
+
+    class _RawStdoutWriter:
+        """后台线程：将原始 BGR 帧写入 stdout（供 ffmpeg H.264 编码）。"""
+
+        def __init__(self):
+            self._queue: list = []
+            self._lock = threading.Lock()
+            self._stop = threading.Event()
+            self._frame_count = 0
+            self._drop_count = 0
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+        def write(self, frame: np.ndarray) -> None:
+            with self._lock:
+                if self._queue:
+                    self._drop_count += 1
+                self._queue = [frame]
+
+        def stop(self) -> None:
+            self._stop.set()
+            self._thread.join(timeout=2)
+            if self._drop_count:
+                logger.info("Raw stdout 写入: 共 %d 帧, 丢弃 %d 帧", self._frame_count, self._drop_count)
+
+        def _run(self) -> None:
+            import sys
+            stdout = sys.stdout.buffer  # 二进制写入
+            while not self._stop.is_set():
+                frame = None
+                with self._lock:
+                    if self._queue:
+                        frame = self._queue.pop(0)
+                if frame is not None:
+                    try:
+                        # 直接写 raw BGR 数据（ffmpeg -f rawvideo -pix_fmt bgr24）
+                        stdout.write(frame.tobytes())
+                        stdout.flush()
+                        self._frame_count += 1
+                    except (BrokenPipeError, OSError):
+                        break
+                else:
+                    self._stop.wait(0.005)
+
     # ── H265/H264 转码 ────────────────────────
 
     _FFMPEG: str | None = None
@@ -510,9 +555,15 @@ class ShipPipeline:
         total_detections = 0
         start_time = time.time()
 
-        # MJPEG 帧写入器
+        # 帧输出：MJPEG 磁盘写入 + 可选 raw stdout
         frame_writer: ShipPipeline._FrameWriter | None = None
-        if stream_dir:
+        raw_writer: ShipPipeline._RawStdoutWriter | None = None
+        raw_stdout = self._config.get("pipeline", {}).get("raw_stdout", False)
+
+        if raw_stdout:
+            raw_writer = ShipPipeline._RawStdoutWriter()
+            logger.info("Raw stdout 帧输出已启用（供 H.264 编码）")
+        elif stream_dir:
             stream_path = Path(stream_dir)
             stream_path.mkdir(parents=True, exist_ok=True)
             frame_writer = ShipPipeline._FrameWriter(stream_path, quality=70)
@@ -602,8 +653,10 @@ class ShipPipeline:
                 if video_writer:
                     video_writer.write(display_frame)
 
-                # MJPEG 帧输出（后台线程编码，不阻塞主循环）
-                if frame_writer:
+                # 帧输出：raw stdout（H.264 编码用）或 MJPEG 磁盘写入
+                if raw_writer:
+                    raw_writer.write(display_frame)
+                elif frame_writer:
                     frame_writer.write(display_frame)
 
                 if frame_callback:
@@ -674,6 +727,8 @@ class ShipPipeline:
         finally:
             if self._concurrent_mode:
                 self._stop_workers()
+            if raw_writer:
+                raw_writer.stop()
             if frame_writer:
                 frame_writer.stop()
             input_src.release()

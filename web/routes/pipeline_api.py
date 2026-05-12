@@ -46,6 +46,10 @@ _running_processes: dict[str, asyncio.subprocess.Process] = {}
 _task_status: dict[str, dict[str, Any]] = {}
 _stop_signals: set[str] = set()  # 已发送停止信号的任务
 
+# ── H.264 推流状态 ──
+# 每个 task 的 ffmpeg 进程和 WebSocket 观众
+_h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, init_segment, ...}
+
 
 def _get_demo_config() -> dict:
     config = load_config()
@@ -574,13 +578,12 @@ async def start_pipeline(req: PipelineStartRequest):
 
     if is_camera:
         cmd.append("--camera")
-        # 摄像头模式：通过 stream-dir 实现 MJPEG 流，不需要 --display
+        # 摄像头模式：通过 stream-dir 实现 MJPEG 流
         stream_dir = _get_stream_dir(task_id)
         cmd.extend(["--stream-dir", str(stream_dir)])
     else:
-        # 文件模式：实时预览 + 输出视频
-        stream_dir = _get_stream_dir(task_id)
-        cmd.extend(["--stream-dir", str(stream_dir)])
+        # 文件模式：raw stdout 输出（H.264 编码用），不写磁盘
+        cmd.append("--raw-stdout")
         if req.display:
             cmd.append("--display")
     cmd.append("--demo")
@@ -604,13 +607,18 @@ async def start_pipeline(req: PipelineStartRequest):
         await sem.acquire()
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,  # raw BGR 帧输出
+            stderr=asyncio.subprocess.PIPE,  # 日志和进度
             cwd=str(Path.cwd()),
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
         )
         async with _state_lock:
             _running_processes[task_id] = process
+
+        # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
+        if not is_camera:
+            asyncio.create_task(_start_h264_reader(task_id, process))
+
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
     except FileNotFoundError:
@@ -627,18 +635,12 @@ async def start_pipeline(req: PipelineStartRequest):
     )
 
 
-async def _read_stderr(process: asyncio.subprocess.Process) -> bytes:
-    """并发读取 stderr，避免 stdout/stderr 缓冲区死锁"""
-    return await process.stderr.read()
-
-
 async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem: asyncio.Semaphore):
-    """异步等待 pipeline 完成，实时解析进度，带超时保护"""
-    stderr_task = asyncio.create_task(_read_stderr(process))
+    """异步等待 pipeline 完成，从 stderr 读取进度（stdout 用于 raw 帧输出）"""
     try:
         while True:
             try:
-                line = await asyncio.wait_for(process.stdout.readline(), timeout=300)
+                line = await asyncio.wait_for(process.stderr.readline(), timeout=300)
             except asyncio.TimeoutError:
                 if process.returncode is not None:
                     break
@@ -674,7 +676,6 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
             logger.info("[%s] %s", task_id, text)
 
         await process.wait()
-        stderr = await stderr_task
 
         async with _state_lock:
             if process.returncode == 0:
@@ -683,17 +684,17 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 logger.info("Pipeline 完成: %s", task_id)
             else:
                 _task_status[task_id]["status"] = "failed"
-                error_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "未知错误"
-                _task_status[task_id]["error"] = error_msg
-                logger.error("Pipeline 失败 [%s]: %s", task_id, error_msg)
+                _task_status[task_id]["error"] = "Pipeline 进程异常退出"
+                logger.error("Pipeline 失败 [%s]: rc=%d", task_id, process.returncode)
     except Exception as e:
         async with _state_lock:
             _task_status[task_id]["status"] = "failed"
             _task_status[task_id]["error"] = str(e)
         logger.error("Pipeline 异常 [%s]: %s", task_id, e)
     finally:
-        # 释放并发信号量
         sem.release()
+        # 停止 H.264 推流
+        await _stop_h264_stream(task_id)
         async with _state_lock:
             _running_processes.pop(task_id, None)
             _stop_signals.discard(task_id)
@@ -837,7 +838,239 @@ def _get_browser_frames_dir(task_id: str) -> Path:
     return d
 
 
-# ── WebSocket 实时推流 ──
+# ── H.264 推流管理 ──
+
+async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process):
+    """后台任务：从 pipeline stdout 读取 raw BGR 帧，启动 ffmpeg 编码为 H.264 fMP4"""
+    import struct
+
+    # 从 config 获取视频尺寸（pipeline 默认 640x480，会自动 resize）
+    config = load_config()
+    w = config.get("pipeline", {}).get("input_width", 640)
+    h = config.get("pipeline", {}).get("input_height", 480)
+
+    # ffmpeg 命令：stdin raw BGR → H.264 fMP4
+    ffmpeg_cmd = _find_binary("ffmpeg") or "ffmpeg"
+    ffmpeg_args = [
+        ffmpeg_cmd, "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-video_size", f"{w}x{h}",
+        "-i", "pipe:0",
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-profile:v", "baseline", "-level", "3.0",
+        "-bf", "0", "-g", "30",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
+        "-f", "mp4", "-frag_duration", "500000",
+        "pipe:1",
+    ]
+
+    # 状态初始化
+    async with _state_lock:
+        _h264_streams[task_id] = {
+            "ffmpeg": None,
+            "viewers": set(),
+            "init_segment": None,
+            "latest_segments": [],
+            "max_segments": 30,
+            "reader_task": None,
+        }
+
+    ffmpeg_proc = None
+    init_sent = False
+    box_buffer = b""
+
+    try:
+        # 从 pipeline stdout 读取 raw 帧，喂给 ffmpeg
+        loop = asyncio.get_event_loop()
+
+        # 启动 ffmpeg
+        ffmpeg_proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        async with _state_lock:
+            _h264_streams[task_id]["ffmpeg"] = ffmpeg_proc
+
+        frame_size = w * h * 3
+        running = True
+
+        async def feed_frames():
+            """从 pipeline stdout 读 raw 帧 → ffmpeg stdin"""
+            nonlocal running
+            try:
+                while running:
+                    data = await process.stdout.readexactly(frame_size)
+                    if not data:
+                        break
+                    if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                        ffmpeg_proc.stdin.write(data)
+                        await ffmpeg_proc.stdin.drain()
+                    else:
+                        break
+            except (asyncio.IncompleteReadError, BrokenPipeError, OSError):
+                pass
+            finally:
+                running = False
+                if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                    ffmpeg_proc.stdin.close()
+
+        async def read_ffmpeg_output():
+            """从 ffmpeg stdout 读取 fMP4 数据，解析 box 并广播"""
+            nonlocal box_buffer, init_sent, running
+            try:
+                while running:
+                    chunk = await ffmpeg_proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    box_buffer += chunk
+                    # 解析 fMP4 box
+                    while len(box_buffer) >= 8:
+                        box_size = int.from_bytes(box_buffer[:4], "big")
+                        if box_size < 8 or len(box_buffer) < box_size:
+                            break
+                        box_data = box_buffer[:box_size]
+                        box_buffer = box_buffer[box_size:]
+                        box_type = box_data[4:8]
+
+                        if box_type == b"moov":
+                            # 初始化段（codec info）
+                            async with _state_lock:
+                                _h264_streams[task_id]["init_segment"] = box_data
+                            await _broadcast_h264(task_id, b"\x01" + len(box_data).to_bytes(4, "big") + box_data)
+                        elif box_type in (b"moof", b"mdat"):
+                            # 媒体段
+                            async with _state_lock:
+                                stream = _h264_streams[task_id]
+                                stream["latest_segments"].append(box_data)
+                                if len(stream["latest_segments"]) > stream["max_segments"]:
+                                    stream["latest_segments"] = stream["latest_segments"][-stream["max_segments"]:]
+                            await _broadcast_h264(task_id, b"\x02" + len(box_data).to_bytes(4, "big") + box_data)
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                running = False
+
+        # 并行运行 frame feeder + output reader
+        await asyncio.gather(feed_frames(), read_ffmpeg_output())
+
+    except Exception as e:
+        logger.error("H.264 推流异常 [%s]: %s", task_id, e)
+    finally:
+        # 清理 ffmpeg
+        if ffmpeg_proc:
+            try:
+                if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                    ffmpeg_proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                ffmpeg_proc.kill()
+            except ProcessLookupError:
+                pass
+        async with _state_lock:
+            _h264_streams.pop(task_id, None)
+        logger.info("H.264 推流结束: %s", task_id)
+
+
+async def _broadcast_h264(task_id: str, data: bytes):
+    """向所有观看此 task 的 WebSocket 客户端广播 fMP4 数据"""
+    async with _state_lock:
+        stream = _h264_streams.get(task_id)
+        if not stream:
+            return
+        viewers = list(stream["viewers"])
+
+    if not viewers:
+        return
+
+    disconnected = []
+    for ws in viewers:
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            disconnected.append(ws)
+
+    if disconnected:
+        async with _state_lock:
+            stream = _h264_streams.get(task_id)
+            if stream:
+                for ws in disconnected:
+                    stream["viewers"].discard(ws)
+
+
+async def _stop_h264_stream(task_id: str):
+    """停止 H.264 推流"""
+    async with _state_lock:
+        stream = _h264_streams.pop(task_id, None)
+    if not stream:
+        return
+    # 通知所有客户端
+    for ws in list(stream.get("viewers", [])):
+        try:
+            await ws.send_json({"type": "done"})
+        except Exception:
+            pass
+    # 杀掉 ffmpeg
+    ffmpeg = stream.get("ffmpeg")
+    if ffmpeg:
+        try:
+            ffmpeg.kill()
+        except ProcessLookupError:
+            pass
+
+
+# ── WebSocket H.264 推流端点 ──
+
+@router.websocket("/ws/h264/{task_id}")
+async def ws_h264_stream(websocket: WebSocket, task_id: str):
+    """WebSocket H.264 推流 — fMP4 over WebSocket，前端用 MSE 播放"""
+    async with _state_lock:
+        if task_id not in _task_status:
+            await websocket.close(code=4004, reason="任务不存在")
+            return
+
+    await websocket.accept()
+
+    async with _state_lock:
+        stream = _h264_streams.get(task_id)
+        if not stream:
+            await websocket.close(code=4004, reason="推流未就绪")
+            return
+        stream["viewers"].add(websocket)
+
+    try:
+        # 发送初始化段（如果已有）
+        init_seg = stream.get("init_segment")
+        if init_seg:
+            await websocket.send_bytes(b"\x01" + len(init_seg).to_bytes(4, "big") + init_seg)
+
+        # 发送最近的媒体段（避免新客户端黑屏）
+        for seg in stream.get("latest_segments", []):
+            await websocket.send_bytes(b"\x02" + len(seg).to_bytes(4, "big") + seg)
+
+        # 保持连接，等待后续帧
+        while True:
+            # 检查任务状态
+            async with _state_lock:
+                task = _task_status.get(task_id)
+                if not task or task["status"] != "running":
+                    break
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
+    finally:
+        async with _state_lock:
+            stream = _h264_streams.get(task_id)
+            if stream:
+                stream["viewers"].discard(websocket)
+
+
+# ── WebSocket JPEG 推流（兼容） ──
 
 # 每个 task 的 WebSocket 观众集合
 _ws_viewers: dict[str, set[WebSocket]] = {}

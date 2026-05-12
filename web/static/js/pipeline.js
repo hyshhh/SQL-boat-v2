@@ -34,8 +34,10 @@ let selectedVideo = null;
 let currentTaskId = null;
 let statusPollTimer = null;
 let streamWs = null;        // WebSocket 推流连接
-let streamCanvas = null;     // 渲染 canvas
-let streamCtx = null;
+let _h264Ws = null;          // H.264 WebSocket
+let _h264MediaSource = null; // MediaSource
+let _h264SourceBuffer = null;// SourceBuffer
+let _h264Queue = [];         // 积压的 segment 队列
 
 // ── 视频上传 ──
 const videoUploadZone = document.getElementById('videoUploadZone');
@@ -250,16 +252,14 @@ async function startVideoPipeline() {
     document.getElementById('btnStartPipeline').style.display = 'none';
     document.getElementById('btnStopPipeline').style.display = '';
 
-    // 实时预览：WebSocket 推流（比 MJPEG 效率更高）
+    // 实时预览：H.264 WebSocket 推流 + MSE 播放
     const resultPlaceholder = document.getElementById('resultPlaceholder');
     if (resultPlaceholder) {
       resultPlaceholder.innerHTML = `
-        <canvas id="streamCanvas" style="max-width:100%;border-radius:8px;background:#000;display:block"></canvas>
+        <video id="streamVideo" autoplay muted playsinline style="max-width:100%;border-radius:8px;background:#000;display:block"></video>
         <div id="streamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px">连接中...</div>
       `;
       resultPlaceholder.style.display = '';
-      streamCanvas = document.getElementById('streamCanvas');
-      streamCtx = streamCanvas.getContext('2d');
     }
 
     connectStreamWs(currentTaskId);
@@ -272,85 +272,137 @@ async function startVideoPipeline() {
   }
 }
 
-/** 建立 WebSocket 推流连接 */
+/** 建立 H.264 WebSocket 推流连接（MSE 播放） */
 function connectStreamWs(taskId) {
   disconnectStreamWs();
 
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/stream/${taskId}`;
+  const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/h264/${taskId}`;
 
-  const img = new Image();
-  let frameCount = 0;
-  let fpsTimer = performance.now();
+  const videoEl = document.getElementById('streamVideo');
+  if (!videoEl) return;
 
-  const ws = new WebSocket(wsUrl);
-  ws.binaryType = 'arraybuffer';
-  streamWs = ws;
+  // MediaSource
+  const ms = new MediaSource();
+  videoEl.src = URL.createObjectURL(ms);
+  _h264MediaSource = ms;
+  _h264SourceBuffer = null;
+  _h264Queue = [];
 
-  ws.onmessage = (evt) => {
-    if (evt.data instanceof ArrayBuffer) {
-      // 二进制帧 = JPEG 数据，直接渲染到 canvas
-      const blob = new Blob([evt.data], { type: 'image/jpeg' });
-      const url = URL.createObjectURL(blob);
+  ms.addEventListener('sourceopen', () => {
+    // 等 WebSocket 收到 init segment 后再添加 SourceBuffer
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    streamWs = ws;
+    _h264Ws = ws;
 
-      img.onload = () => {
-        if (streamCanvas && streamCtx) {
-          // 首次或尺寸变化时调整 canvas
-          if (streamCanvas.width !== img.naturalWidth || streamCanvas.height !== img.naturalHeight) {
-            streamCanvas.width = img.naturalWidth;
-            streamCanvas.height = img.naturalHeight;
+    let frameCount = 0;
+    let fpsTimer = performance.now();
+
+    ws.onmessage = (evt) => {
+      if (evt.data instanceof ArrayBuffer) {
+        const view = new DataView(evt.data);
+        const msgType = view.getUint8(0);
+        const msgLen = view.getUint32(1, false); // big-endian
+        const payload = evt.data.slice(5);
+
+        if (msgType === 0x01) {
+          // Init segment (moov) — 创建 SourceBuffer
+          try {
+            const codecs = 'avc1.42C01E'; // H.264 Baseline 3.0
+            const sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
+            _h264SourceBuffer = sb;
+
+            sb.addEventListener('updateend', () => {
+              // 处理队列中积压的数据
+              if (_h264Queue.length > 0 && !sb.updating) {
+                try {
+                  sb.appendBuffer(_h264Queue.shift());
+                } catch (e) {}
+              }
+            });
+
+            sb.appendBuffer(payload);
+          } catch (e) {
+            console.error('MSE SourceBuffer 创建失败:', e);
           }
-          streamCtx.drawImage(img, 0, 0);
+
+        } else if (msgType === 0x02) {
+          // Media segment (moof+mdat)
+          if (_h264SourceBuffer) {
+            if (_h264SourceBuffer.updating) {
+              // 限制队列大小，避免内存爆炸
+              if (_h264Queue.length < 10) {
+                _h264Queue.push(payload);
+              }
+            } else {
+              try {
+                _h264SourceBuffer.appendBuffer(payload);
+              } catch (e) {}
+            }
+          }
+
+          // FPS 统计
+          frameCount++;
+          const now = performance.now();
+          if (now - fpsTimer > 1000) {
+            const fps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
+            const fpsEl = document.getElementById('streamFps');
+            if (fpsEl) fpsEl.textContent = `${fps} seg/s`;
+            frameCount = 0;
+            fpsTimer = now;
+          }
         }
-        URL.revokeObjectURL(url);
+      } else {
+        // JSON 控制消息
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'done') {
+            disconnectStreamWs();
+            const fpsEl = document.getElementById('streamFps');
+            if (fpsEl) fpsEl.textContent = '处理完成';
+          }
+        } catch {}
+      }
+    };
 
-        // FPS 统计
-        frameCount++;
-        const now = performance.now();
-        if (now - fpsTimer > 1000) {
-          const fps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
-          const fpsEl = document.getElementById('streamFps');
-          if (fpsEl) fpsEl.textContent = `${fps} FPS`;
-          frameCount = 0;
-          fpsTimer = now;
-        }
-      };
-      img.src = url;
+    ws.onclose = () => {
+      if (currentTaskId === taskId) {
+        setTimeout(() => {
+          if (currentTaskId === taskId) connectStreamWs(taskId);
+        }, 1000);
+      }
+    };
 
-    } else {
-      // JSON 控制消息
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.type === 'done') {
-          disconnectStreamWs();
-          const fpsEl = document.getElementById('streamFps');
-          if (fpsEl) fpsEl.textContent = '处理完成';
-        }
-      } catch {}
-    }
-  };
-
-  ws.onclose = () => {
-    // 如果任务还在运行，尝试重连
-    if (currentTaskId === taskId) {
-      setTimeout(() => {
-        if (currentTaskId === taskId) connectStreamWs(taskId);
-      }, 1000);
-    }
-  };
-
-  ws.onerror = () => {};
+    ws.onerror = () => {};
+  });
 }
 
-/** 断开 WebSocket 推流 */
+/** 断开 H.264 推流 */
 function disconnectStreamWs() {
+  if (_h264Ws) {
+    _h264Ws.onclose = null;
+    _h264Ws.close();
+    _h264Ws = null;
+  }
   if (streamWs) {
-    streamWs.onclose = null; // 阻止重连
+    streamWs.onclose = null;
     streamWs.close();
     streamWs = null;
   }
-  streamCanvas = null;
-  streamCtx = null;
+  // 释放 MediaSource
+  if (_h264MediaSource && _h264MediaSource.readyState === 'open') {
+    try { _h264MediaSource.endOfStream(); } catch {}
+  }
+  _h264MediaSource = null;
+  _h264SourceBuffer = null;
+  _h264Queue = [];
+
+  const videoEl = document.getElementById('streamVideo');
+  if (videoEl) {
+    videoEl.pause();
+    videoEl.src = '';
+  }
 }
 
 async function stopVideoPipeline() {
