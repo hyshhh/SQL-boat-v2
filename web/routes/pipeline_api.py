@@ -908,6 +908,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
     ffmpeg_proc = None
     init_sent = False
     box_buffer = b""
+    _pending_moof = None
 
     try:
         # 从 pipeline stdout 读取 raw 帧，喂给 ffmpeg
@@ -968,7 +969,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
                     if not chunk:
                         break
                     box_buffer += chunk
-                    # 解析 fMP4 box
+                    # 解析 fMP4 box，合并 moof+mdat 为完整 fragment
                     while len(box_buffer) >= 8:
                         box_size = int.from_bytes(box_buffer[:4], "big")
                         if box_size < 8 or len(box_buffer) < box_size:
@@ -982,14 +983,19 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
                             async with _state_lock:
                                 _h264_streams[task_id]["init_segment"] = box_data
                             await _broadcast_h264(task_id, b"\x01" + len(box_data).to_bytes(4, "big") + box_data)
-                        elif box_type in (b"moof", b"mdat"):
-                            # 媒体段
+                        elif box_type == b"moof":
+                            # 媒体段头部，等 mdat 拼接后一起发
+                            _pending_moof = box_data
+                        elif box_type == b"mdat":
+                            # 媒体段数据，和 moof 合并为完整 fragment
+                            fragment = (_pending_moof or b"") + box_data
+                            _pending_moof = None
                             async with _state_lock:
                                 stream = _h264_streams[task_id]
-                                stream["latest_segments"].append(box_data)
+                                stream["latest_segments"].append(fragment)
                                 if len(stream["latest_segments"]) > stream["max_segments"]:
                                     stream["latest_segments"] = stream["latest_segments"][-stream["max_segments"]:]
-                            await _broadcast_h264(task_id, b"\x02" + len(box_data).to_bytes(4, "big") + box_data)
+                            await _broadcast_h264(task_id, b"\x02" + len(fragment).to_bytes(4, "big") + fragment)
             except (BrokenPipeError, OSError):
                 pass
             finally:
