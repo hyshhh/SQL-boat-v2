@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -56,13 +57,51 @@ def _is_camera_source(source: str) -> bool:
 
 
 def _atomic_write_jpg(path: Path, data: bytes) -> None:
-    """原子写入 JPEG：先写临时文件，再 rename（保证读端不会读到半截）"""
+    """原子写入 JPEG：先写临时文件，再 rename（保证读端不会读到半截）
+    注意：不调用 os.fsync()，rename 本身已保证原子性，省去刷盘开销。"""
     tmp = path.with_suffix(".tmp")
     with open(tmp, "wb") as f:
         f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
     tmp.rename(path)
+
+
+class _FrameWriter:
+    """后台线程：异步编码 JPEG 并写入磁盘，不阻塞主检测循环。"""
+
+    def __init__(self, stream_dir: Path, quality: int = 70):
+        self._path = stream_dir / "latest.jpg"
+        self._quality = quality
+        self._queue: list[any] = []  # 最多保留 1 帧
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def write(self, frame) -> None:
+        """提交一帧到后台编码队列（非阻塞，旧帧会被丢弃）"""
+        with self._lock:
+            self._queue = [frame]  # 只保留最新帧
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        import cv2
+        while not self._stop.is_set():
+            frame = None
+            with self._lock:
+                if self._queue:
+                    frame = self._queue.pop(0)
+            if frame is not None:
+                try:
+                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._quality])
+                    _atomic_write_jpg(self._path, buf.tobytes())
+                except Exception:
+                    pass
+            else:
+                # 没有新帧，短暂等待避免空转
+                self._stop.wait(0.005)
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
@@ -154,12 +193,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     # ── MJPEG 帧输出目录 ──
     stream_dir: Path | None = None
-    stream_latest: Path | None = None
+    frame_writer: _FrameWriter | None = None
     if args.stream_dir:
         stream_dir = Path(args.stream_dir)
         stream_dir.mkdir(parents=True, exist_ok=True)
-        stream_latest = stream_dir / "latest.jpg"
-        logger.info("MJPEG 帧输出: %s", stream_latest)
+        frame_writer = _FrameWriter(stream_dir, quality=70)
+        logger.info("MJPEG 帧输出: %s (后台线程编码)", stream_dir / "latest.jpg")
 
     # ── 初始化 VLM ──
     vlm = None
@@ -379,13 +418,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             elif writer:
                 writer.write(frame)
 
-            # ── 写入 MJPEG 帧（原子写入，避免读到半截 JPEG）──
-            if stream_latest and annotated is not None:
-                try:
-                    _, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                    _atomic_write_jpg(stream_latest, buf.tobytes())
-                except Exception:
-                    pass
+            # ── MJPEG 帧（后台线程编码，不阻塞主循环）──
+            if frame_writer and annotated is not None:
+                frame_writer.write(annotated)
 
             # ── 弹窗显示 ──
             if display_enabled and annotated is not None:
@@ -416,6 +451,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
         cap.release()
         if writer:
             writer.release()
+        if frame_writer:
+            frame_writer.stop()
         if display_enabled:
             cv2.destroyAllWindows()
         # 清理临时 tracker yaml

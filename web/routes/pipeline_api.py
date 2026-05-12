@@ -531,20 +531,25 @@ async def camera_stream(task_id: str):
             b'\xff\xda\x00\x08\x01\x01\x00\x00?\x00T\xdb\x9e\xb7\xa7\x93\x95'
             b'\xff\xd9'
         )
+        last_data = b""
+        target_interval = 0.04  # ~25fps
         while task_id in _task_status and _task_status[task_id]["status"] == "running":
+            t0 = asyncio.get_event_loop().time()
             if frame_file.exists():
                 try:
                     frame_data = frame_file.read_bytes()
-                    if frame_data:
+                    if frame_data and frame_data != last_data:
+                        last_data = frame_data
                         yield (
                             f"{boundary}\r\n"
                             f"Content-Type: image/jpeg\r\n\r\n"
                         ).encode() + frame_data + b"\r\n"
-                    else:
-                        await asyncio.sleep(0.05)
+                    elif not frame_data:
+                        await asyncio.sleep(0.01)
                         continue
+                    # frame_data == last_data → 同一帧，不发，直接等下一轮
                 except (OSError, FileNotFoundError):
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.01)
                     continue
             else:
                 # 发送黑色占位图而非 text/plain，img 标签可以正常渲染
@@ -552,7 +557,10 @@ async def camera_stream(task_id: str):
                     f"{boundary}\r\n"
                     f"Content-Type: image/jpeg\r\n\r\n"
                 ).encode() + _black_jpeg + b"\r\n"
-            await asyncio.sleep(0.05)  # ~20fps
+            # 动态 sleep：减去本轮实际耗时，保持稳定帧率
+            elapsed = asyncio.get_event_loop().time() - t0
+            sleep_time = max(0.005, target_interval - elapsed)
+            await asyncio.sleep(sleep_time)
 
     return StreamingResponse(
         generate(),
