@@ -111,6 +111,26 @@ class InputSource:
     def total_frames(self) -> int:
         return self._total_frames
 
+    @staticmethod
+    def probe_resolution(source: str | int) -> tuple[int, int] | None:
+        """快速探测视频源分辨率（打开 → 读一帧 → 释放），用于提前获取摄像头尺寸。"""
+        cap_source = int(source) if isinstance(source, str) and source.isdigit() else source
+        cap = cv2.VideoCapture(cap_source)
+        if not cap.isOpened():
+            return None
+        try:
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w <= 0 or h <= 0:
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    h, w = frame.shape[:2]
+            return (w, h) if w > 0 and h > 0 else None
+        except Exception:
+            return None
+        finally:
+            cap.release()
+
     @property
     def source_fps(self) -> float:
         return self._fps

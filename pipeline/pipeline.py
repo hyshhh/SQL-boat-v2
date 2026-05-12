@@ -68,6 +68,11 @@ class ShipPipeline:
         self._enable_refresh: bool = bool(pipe_cfg.get("enable_refresh", False))
         self._gap_num: int = pipe_cfg.get("gap_num") or 150
         self._prompt_mode: str = pipe_cfg.get("prompt_mode") or "detailed"
+        self._output_size: tuple[int, int] | None = None
+        _os = pipe_cfg.get("output_size")
+        if _os and len(_os) == 2:
+            self._output_size = (int(_os[0]), int(_os[1]))
+        self._stop_file: Path | None = Path(pipe_cfg["stop_file"]) if pipe_cfg.get("stop_file") else None
 
         from database import ShipDatabase
         self._db = ShipDatabase(config=config)
@@ -590,6 +595,8 @@ class ShipPipeline:
             stop_file = None
             if stream_dir:
                 stop_file = Path(stream_dir) / "__STOP__"
+            elif self._stop_file:
+                stop_file = self._stop_file
 
             while True:
                 # 检查停止信号文件
@@ -655,7 +662,13 @@ class ShipPipeline:
 
                 # 帧输出：raw stdout（H.264 编码用）或 MJPEG 磁盘写入
                 if raw_writer:
-                    raw_writer.write(display_frame)
+                    out_frame = display_frame
+                    if self._output_size:
+                        ow, oh = self._output_size
+                        fh, fw = display_frame.shape[:2]
+                        if fw != ow or fh != oh:
+                            out_frame = cv2.resize(display_frame, (ow, oh), interpolation=cv2.INTER_LINEAR)
+                    raw_writer.write(out_frame)
                 elif frame_writer:
                     frame_writer.write(display_frame)
 

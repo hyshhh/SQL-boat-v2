@@ -76,6 +76,26 @@ def _get_allowed_extensions() -> set[str]:
     return set(cfg.get("allowed_extensions", [".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm"]))
 
 
+def _probe_camera_resolution(source: str) -> tuple[int, int] | None:
+    """快速探测摄像头/RTSP 分辨率，用于 H.264 编码器初始化。"""
+    import cv2
+    try:
+        cap_source = int(source) if source.isdigit() else source
+        cap = cv2.VideoCapture(cap_source)
+        if not cap.isOpened():
+            return None
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if w <= 0 or h <= 0:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                h, w = frame.shape[:2]
+        cap.release()
+        return (w, h) if w > 0 and h > 0 else None
+    except Exception:
+        return None
+
+
 def _get_stream_dir(task_id: str) -> Path:
     """获取摄像头帧共享目录"""
     d = Path("./_camera_frames") / task_id
@@ -568,9 +588,18 @@ async def start_pipeline(req: PipelineStartRequest):
             raise HTTPException(status_code=404, detail=f"视频不存在: {req.video_filename}")
         video_source = str(video_path)
 
-    # 检测视频分辨率（H.264 编码需要知道帧尺寸）
+    # 探测视频分辨率（H.264 编码需要知道帧尺寸）
     video_w, video_h = 640, 480  # 默认值
-    if not is_camera and video_path:
+    if is_camera:
+        # 摄像头/RTSP：提前探测分辨率
+        cam_source = video_source if not video_source.startswith("__camera__") else video_source.replace("__camera__", "")
+        detected = _probe_camera_resolution(cam_source)
+        if detected:
+            video_w, video_h = detected
+            logger.info("摄像头分辨率: %dx%d", video_w, video_h)
+        else:
+            logger.warning("摄像头分辨率探测失败，使用默认: %dx%d", video_w, video_h)
+    elif video_path:
         detected = _probe_video_size(str(video_path))
         if detected:
             video_w, video_h = detected
@@ -609,9 +638,12 @@ async def start_pipeline(req: PipelineStartRequest):
 
     if is_camera:
         cmd.append("--camera")
-        # 摄像头模式：通过 stream-dir 实现 MJPEG 流
+        # 摄像头也走 raw stdout → H.264 推流（和视频文件一样）
+        cmd.append("--raw-stdout")
+        cmd.extend(["--output-size", f"{video_w}x{video_h}"])
+        # 停止信号文件（替代原来 --stream-dir 的 __STOP__ 机制）
         stream_dir = _get_stream_dir(task_id)
-        cmd.extend(["--stream-dir", str(stream_dir)])
+        cmd.extend(["--stop-file", str(stream_dir / "__STOP__")])
     else:
         # 文件模式：raw stdout 输出（H.264 编码用），不写磁盘
         cmd.append("--raw-stdout")
@@ -647,8 +679,7 @@ async def start_pipeline(req: PipelineStartRequest):
             _running_processes[task_id] = process
 
         # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
-        if not is_camera:
-            asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h))
+        asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h))
 
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
@@ -1318,7 +1349,9 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         "--frames-dir", str(frames_dir),
         "--virtual-fps", "15",
         "--no-output",  # 不保存输出视频
-        "--stream-dir", str(stream_dir),
+        "--raw-stdout",  # raw stdout → H.264 推流
+        "--output-size", "640x480",  # 统一输出尺寸
+        "--stop-file", str(stream_dir / "__STOP__"),  # 停止信号
         "--camera",
         "--demo",
     ]
@@ -1370,6 +1403,8 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         )
         async with _state_lock:
             _running_processes[task_id] = process
+        # 启动 H.264 编码器（浏览器摄像头也走 H.264 推流）
+        asyncio.create_task(_start_h264_reader(task_id, process, 640, 480))
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
     except FileNotFoundError:
         sem.release()

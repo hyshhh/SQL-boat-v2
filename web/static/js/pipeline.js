@@ -656,13 +656,8 @@ async function startBrowserCamera() {
         document.getElementById('btnStartCamera').style.display = 'none';
         document.getElementById('btnStopCamera').style.display = '';
 
-        const cameraStream = document.getElementById('cameraStream');
-        const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
-        if (cameraStream) {
-          cameraStream.src = `${PIPE_API}/stream/${cameraTaskId}`;
-          cameraStream.style.display = '';
-          if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
-        }
+        // H.264 WebSocket + MSE 播放（和视频 Demo 一样）
+        connectCameraH264(cameraTaskId);
 
         startFrameCapture(ws, stream);
         startCameraPolling();
@@ -807,13 +802,8 @@ async function startCameraPipeline() {
     document.getElementById('btnStopCamera').style.display = '';
     showToast('摄像头 Pipeline 已启动');
 
-    const cameraStream = document.getElementById('cameraStream');
-    const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
-    if (cameraStream) {
-      cameraStream.src = `${PIPE_API}/stream/${cameraTaskId}`;
-      cameraStream.style.display = '';
-      if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
-    }
+    // H.264 WebSocket + MSE 播放
+    connectCameraH264(cameraTaskId);
 
     startCameraPolling();
   } catch (e) {
@@ -829,10 +819,8 @@ async function stopCameraPipeline() {
 
   const taskId = cameraTaskId;
 
-  const cameraStream = document.getElementById('cameraStream');
-  if (cameraStream) {
-    cameraStream.src = '';
-  }
+  // 断开 H.264 推流
+  disconnectCameraH264();
 
   stopCameraPolling();
   updateCameraStatus('idle', '正在停止...');
@@ -844,14 +832,12 @@ async function stopCameraPipeline() {
     } catch {}
   }
 
-  const cameraResultVideo = document.getElementById('cameraResultVideo');
+  const cameraStream = document.getElementById('cameraStream');
   const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
   if (cameraStream) {
+    cameraStream.pause();
+    cameraStream.src = '';
     cameraStream.style.display = 'none';
-  }
-  if (cameraResultVideo) {
-    cameraResultVideo.src = '';
-    cameraResultVideo.style.display = 'none';
   }
   if (cameraPlaceholder) cameraPlaceholder.style.display = '';
 
@@ -917,6 +903,114 @@ function resetCameraButtons() {
   const stopBtn = document.getElementById('btnStopCamera');
   if (startBtn) startBtn.style.display = '';
   if (stopBtn) stopBtn.style.display = 'none';
+}
+
+// ── 摄像头 H.264 推流状态 ──
+let _camH264Ws = null;
+let _camH264MediaSource = null;
+let _camH264SourceBuffer = null;
+let _camH264Queue = [];
+
+function connectCameraH264(taskId) {
+  disconnectCameraH264();
+
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/h264/${taskId}`;
+
+  const videoEl = document.getElementById('cameraStream');
+  const placeholder = document.getElementById('cameraStreamPlaceholder');
+  const fpsEl = document.getElementById('cameraStreamFps');
+  if (!videoEl) return;
+
+  // 显示 video，隐藏 placeholder
+  videoEl.style.display = '';
+  if (placeholder) placeholder.style.display = 'none';
+  if (fpsEl) { fpsEl.style.display = ''; fpsEl.textContent = '连接中...'; }
+
+  const ms = new MediaSource();
+  videoEl.src = URL.createObjectURL(ms);
+  _camH264MediaSource = ms;
+  _camH264SourceBuffer = null;
+  _camH264Queue = [];
+
+  ms.addEventListener('sourceopen', () => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    _camH264Ws = ws;
+
+    let frameCount = 0;
+    let fpsTimer = performance.now();
+
+    ws.onmessage = (evt) => {
+      if (evt.data instanceof ArrayBuffer) {
+        const view = new DataView(evt.data);
+        const msgType = view.getUint8(0);
+        const payload = evt.data.slice(5);
+
+        if (msgType === 0x01) {
+          // Init segment
+          try {
+            const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42C01F"');
+            _camH264SourceBuffer = sb;
+            sb.addEventListener('updateend', () => {
+              if (_camH264Queue.length > 0 && !sb.updating) {
+                try { sb.appendBuffer(_camH264Queue.shift()); } catch (e) {}
+              }
+            });
+            sb.appendBuffer(payload);
+          } catch (e) {
+            console.error('摄像头 MSE SourceBuffer 创建失败:', e);
+          }
+        } else if (msgType === 0x02) {
+          // Media segment
+          if (_camH264SourceBuffer) {
+            if (_camH264SourceBuffer.updating) {
+              if (_camH264Queue.length < 10) _camH264Queue.push(payload);
+            } else {
+              try { _camH264SourceBuffer.appendBuffer(payload); } catch (e) {}
+            }
+          }
+          frameCount++;
+          const now = performance.now();
+          if (now - fpsTimer > 1000) {
+            const fps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
+            if (fpsEl) fpsEl.textContent = `${fps} seg/s`;
+            frameCount = 0;
+            fpsTimer = now;
+          }
+        }
+      } else {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'done') {
+            disconnectCameraH264();
+            if (fpsEl) fpsEl.textContent = '处理完成';
+          }
+        } catch {}
+      }
+    };
+
+    ws.onclose = () => {
+      if (cameraTaskId === taskId) {
+        setTimeout(() => { if (cameraTaskId === taskId) connectCameraH264(taskId); }, 1000);
+      }
+    };
+    ws.onerror = () => {};
+  });
+}
+
+function disconnectCameraH264() {
+  if (_camH264Ws) { _camH264Ws.onclose = null; _camH264Ws.close(); _camH264Ws = null; }
+  if (_camH264MediaSource && _camH264MediaSource.readyState === 'open') {
+    try { _camH264MediaSource.endOfStream(); } catch {}
+  }
+  _camH264MediaSource = null;
+  _camH264SourceBuffer = null;
+  _camH264Queue = [];
+  const videoEl = document.getElementById('cameraStream');
+  if (videoEl) { videoEl.pause(); videoEl.src = ''; }
+  const fpsEl = document.getElementById('cameraStreamFps');
+  if (fpsEl) fpsEl.textContent = '';
 }
 
 // ── 工具函数 ──

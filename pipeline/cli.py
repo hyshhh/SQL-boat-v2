@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-dir", default=None, help="将每帧标注结果以 latest.jpg 写入此目录（供 MJPEG 流读取）")
     parser.add_argument("--no-output", action="store_true", help="不保存输出视频文件（仅实时推流）")
     parser.add_argument("--raw-stdout", action="store_true", help="将原始帧写入 stdout（供 H.264 编码，与 --stream-dir 互斥）")
+    parser.add_argument("--output-size", default=None, help="输出帧尺寸（WxH，如 640x480），仅用于 raw-stdout 模式缩放")
+    parser.add_argument("--stop-file", default=None, help="停止信号文件路径（文件存在时优雅退出）")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志输出")
 
     return parser
@@ -92,6 +94,15 @@ def _merge_args_to_config(args, config: dict) -> dict:
         config["pipeline"]["no_output"] = True
     if args.raw_stdout:
         config["pipeline"]["raw_stdout"] = True
+    if args.output_size:
+        try:
+            w, h = args.output_size.lower().split("x")
+            config["pipeline"]["output_size"] = [int(w), int(h)]
+        except ValueError:
+            console.print(f"[red]--output-size 格式错误: {args.output_size}，应为 WxH（如 640x480）[/red]")
+            sys.exit(1)
+    if args.stop_file:
+        config["pipeline"]["stop_file"] = args.stop_file
     return config
 
 
