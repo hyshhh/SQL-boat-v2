@@ -21,6 +21,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
+# ── 并发控制 ──
+# 限制同时运行的 pipeline 数量，防止多人访问时 GPU/CPU 被打爆
+_MAX_PARALLEL_PIPELINES = 2
+_pipeline_semaphore: asyncio.Semaphore | None = None
+_state_lock = asyncio.Lock()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """延迟初始化信号量，从 config 读取最大并发数"""
+    global _pipeline_semaphore, _MAX_PARALLEL_PIPELINES
+    if _pipeline_semaphore is None:
+        try:
+            config = load_config()
+            _MAX_PARALLEL_PIPELINES = config.get("pipeline", {}).get("max_parallel_pipelines", 2)
+        except Exception:
+            pass
+        _pipeline_semaphore = asyncio.Semaphore(_MAX_PARALLEL_PIPELINES)
+    return _pipeline_semaphore
+
+
 # ── 全局状态 ──
 _running_processes: dict[str, asyncio.subprocess.Process] = {}
 _task_status: dict[str, dict[str, Any]] = {}
@@ -498,6 +518,15 @@ async def start_pipeline(req: PipelineStartRequest):
     """启动视频处理 Pipeline（支持文件和摄像头/RTSP 输入）"""
     _ensure_dirs()
 
+    # 并发控制：检查是否已达上限
+    sem = _get_semaphore()
+    if sem.locked():
+        running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+        raise HTTPException(
+            status_code=429,
+            detail=f"已有 {running_count} 个 Pipeline 在运行（上限 {_MAX_PARALLEL_PIPELINES}），请等待完成后再试",
+        )
+
     is_camera = _is_camera_input(req.video_filename)
     task_id = str(uuid.uuid4())[:8]
 
@@ -506,13 +535,11 @@ async def start_pipeline(req: PipelineStartRequest):
         if video_source.startswith("__camera__"):
             cam_id = video_source.replace("__camera__", "")
             video_source = cam_id
-        output_filename = f"camera_{task_id}.mp4"
     else:
         video_path = _get_video_path(req.video_filename)
         if video_path is None or not video_path.exists():
             raise HTTPException(status_code=404, detail=f"视频不存在: {req.video_filename}")
         video_source = str(video_path)
-        output_filename = None  # 不保存输出视频
 
     # 构建 pipeline 命令
     config = load_config()
@@ -560,18 +587,21 @@ async def start_pipeline(req: PipelineStartRequest):
 
     logger.info("启动 Pipeline: %s (camera=%s)", " ".join(cmd), is_camera)
 
-    _task_status[task_id] = {
-        "task_id": task_id,
-        "status": "running",
-        "video_filename": req.video_filename,
-        "output_filename": output_filename,
-        "output_path": None,
-        "progress": "处理中...",
-        "error": None,
-        "is_camera": is_camera,
-    }
+    async with _state_lock:
+        _task_status[task_id] = {
+            "task_id": task_id,
+            "status": "running",
+            "video_filename": req.video_filename,
+            "output_filename": None,
+            "output_path": None,
+            "progress": "处理中...",
+            "error": None,
+            "is_camera": is_camera,
+        }
 
     try:
+        # 获取信号量（限制并发 pipeline 数量）
+        await sem.acquire()
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -579,19 +609,21 @@ async def start_pipeline(req: PipelineStartRequest):
             cwd=str(Path.cwd()),
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
         )
-        _running_processes[task_id] = process
-        asyncio.create_task(_wait_pipeline(task_id, process, output_filename))
+        async with _state_lock:
+            _running_processes[task_id] = process
+        asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
     except FileNotFoundError:
-        _task_status[task_id]["status"] = "failed"
-        _task_status[task_id]["error"] = "pipeline 模块不存在，请确认 pipeline 目录已实现"
+        sem.release()
+        async with _state_lock:
+            _task_status[task_id]["status"] = "failed"
+            _task_status[task_id]["error"] = "pipeline 模块不存在，请确认 pipeline 目录已实现"
         raise HTTPException(status_code=500, detail="pipeline 模块不存在")
 
     return PipelineStartResponse(
         success=True,
         message=f"Pipeline 已启动，任务 ID: {task_id}",
         task_id=task_id,
-        output_filename=output_filename,
     )
 
 
@@ -600,19 +632,16 @@ async def _read_stderr(process: asyncio.subprocess.Process) -> bytes:
     return await process.stderr.read()
 
 
-async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, output_filename: str | None):
+async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem: asyncio.Semaphore):
     """异步等待 pipeline 完成，实时解析进度，带超时保护"""
-    # 启动并发 stderr 读取，避免缓冲区满导致死锁
     stderr_task = asyncio.create_task(_read_stderr(process))
     try:
         while True:
             try:
                 line = await asyncio.wait_for(process.stdout.readline(), timeout=300)
             except asyncio.TimeoutError:
-                # 5 分钟无输出 → 检查进程是否还活着
                 if process.returncode is not None:
                     break
-                # 检查是否被标记为停止
                 if task_id in _stop_signals:
                     logger.warning("Pipeline 超时且收到停止信号，强制终止: %s", task_id)
                     try:
@@ -630,13 +659,15 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
                 continue
 
             if "进度" in text or "progress" in text.lower() or "%" in text or "处理帧" in text:
-                _task_status[task_id]["progress"] = text
+                async with _state_lock:
+                    _task_status[task_id]["progress"] = text
 
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
                     import json
                     summary = json.loads(text.replace("__PIPELINE_SUMMARY__:", ""))
-                    _task_status[task_id]["summary"] = summary
+                    async with _state_lock:
+                        _task_status[task_id]["summary"] = summary
                 except Exception:
                     pass
 
@@ -645,27 +676,30 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
         await process.wait()
         stderr = await stderr_task
 
-        if process.returncode == 0:
-            _task_status[task_id]["status"] = "completed"
-            _task_status[task_id]["progress"] = "处理完成"
-            logger.info("Pipeline 完成: %s", task_id)
-        else:
-            _task_status[task_id]["status"] = "failed"
-            error_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "未知错误"
-            _task_status[task_id]["error"] = error_msg
-            logger.error("Pipeline 失败 [%s]: %s", task_id, error_msg)
+        async with _state_lock:
+            if process.returncode == 0:
+                _task_status[task_id]["status"] = "completed"
+                _task_status[task_id]["progress"] = "处理完成"
+                logger.info("Pipeline 完成: %s", task_id)
+            else:
+                _task_status[task_id]["status"] = "failed"
+                error_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "未知错误"
+                _task_status[task_id]["error"] = error_msg
+                logger.error("Pipeline 失败 [%s]: %s", task_id, error_msg)
     except Exception as e:
-        _task_status[task_id]["status"] = "failed"
-        _task_status[task_id]["error"] = str(e)
+        async with _state_lock:
+            _task_status[task_id]["status"] = "failed"
+            _task_status[task_id]["error"] = str(e)
         logger.error("Pipeline 异常 [%s]: %s", task_id, e)
     finally:
-        _running_processes.pop(task_id, None)
-        _stop_signals.discard(task_id)
-        # 浏览器摄像头的帧目录由 WebSocket 断开后的 _delayed_cleanup 管理
-        is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
+        # 释放并发信号量
+        sem.release()
+        async with _state_lock:
+            _running_processes.pop(task_id, None)
+            _stop_signals.discard(task_id)
+            is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
         if not is_browser_cam:
             _cleanup_stream_dir(task_id)
-        # 定期清理旧任务记录
         _cleanup_old_tasks()
 
 
@@ -689,18 +723,16 @@ async def get_task_status(task_id: str):
 @router.post("/stop/{task_id}")
 async def stop_pipeline(task_id: str):
     """停止正在运行的 Pipeline"""
-    if task_id not in _running_processes:
-        # 检查是否任务已结束
-        if task_id in _task_status and _task_status[task_id]["status"] != "running":
-            return {"success": True, "message": f"任务已结束: {task_id}"}
-        raise HTTPException(status_code=404, detail=f"任务不存在或已结束: {task_id}")
+    async with _state_lock:
+        if task_id not in _running_processes:
+            if task_id in _task_status and _task_status[task_id]["status"] != "running":
+                return {"success": True, "message": f"任务已结束: {task_id}"}
+            raise HTTPException(status_code=404, detail=f"任务不存在或已结束: {task_id}")
 
-    # 标记停止信号（防止重复停止）
-    if task_id in _stop_signals:
-        return {"success": True, "message": f"任务正在停止中: {task_id}"}
-    _stop_signals.add(task_id)
-
-    process = _running_processes[task_id]
+        if task_id in _stop_signals:
+            return {"success": True, "message": f"任务正在停止中: {task_id}"}
+        _stop_signals.add(task_id)
+        process = _running_processes[task_id]
 
     # 写入停止信号文件（pipeline 可以检测到）
     stream_dir = _get_stream_dir(task_id)
@@ -742,10 +774,11 @@ async def stop_pipeline(task_id: str):
             pass
 
     # 更新状态
-    _task_status[task_id]["status"] = "failed"
-    _task_status[task_id]["error"] = "用户手动停止"
-    _running_processes.pop(task_id, None)
-    _stop_signals.discard(task_id)
+    async with _state_lock:
+        _task_status[task_id]["status"] = "failed"
+        _task_status[task_id]["error"] = "用户手动停止"
+        _running_processes.pop(task_id, None)
+        _stop_signals.discard(task_id)
 
     # 清理帧目录和停止信号文件
     _cleanup_stream_dir(task_id)
@@ -754,10 +787,9 @@ async def stop_pipeline(task_id: str):
 
 
 def _cleanup_old_tasks():
-    """清理已完成/失败的旧任务记录，防止内存泄漏"""
+    """清理已完成/失败的旧任务记录，防止内存泄漏（需在 _state_lock 下调用或单独使用）"""
     global _task_status
     if len(_task_status) > 100:
-        # 保留运行中的 + 最近 50 条
         running = {k: v for k, v in _task_status.items() if v["status"] == "running"}
         finished = sorted(
             [(k, v) for k, v in _task_status.items() if v["status"] != "running"],
@@ -783,20 +815,18 @@ def _cleanup_stream_dir(task_id: str):
 async def _delayed_cleanup(task_id: str, delay: int = 10):
     """延迟清理：等待 pipeline 自然结束后再清理目录"""
     await asyncio.sleep(delay)
-    # 如果 pipeline 还在运行，强制终止
-    if task_id in _running_processes:
-        try:
-            _running_processes[task_id].kill()
-            await asyncio.wait_for(_running_processes[task_id].wait(), timeout=5)
-        except Exception:
-            pass
-        _running_processes.pop(task_id, None)
-    # 更新状态
-    if task_id in _task_status and _task_status[task_id]["status"] == "running":
-        _task_status[task_id]["status"] = "completed"
-        _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
-    # 清理帧目录和停止信号
-    _stop_signals.discard(task_id)
+    async with _state_lock:
+        if task_id in _running_processes:
+            try:
+                _running_processes[task_id].kill()
+                await asyncio.wait_for(_running_processes[task_id].wait(), timeout=5)
+            except Exception:
+                pass
+            _running_processes.pop(task_id, None)
+        if task_id in _task_status and _task_status[task_id]["status"] == "running":
+            _task_status[task_id]["status"] = "completed"
+            _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
+        _stop_signals.discard(task_id)
     _cleanup_stream_dir(task_id)
 
 
@@ -812,15 +842,15 @@ def _get_browser_frames_dir(task_id: str) -> Path:
 @router.get("/stream/{task_id}")
 async def camera_stream(task_id: str):
     """MJPEG 实时流 — 从 pipeline 写入的 latest.jpg 读取帧"""
-    if task_id not in _task_status:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    async with _state_lock:
+        if task_id not in _task_status:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
     stream_dir = _get_stream_dir(task_id)
     frame_file = stream_dir / "latest.jpg"
 
     async def generate():
         boundary = "--frame"
-        # 发送一个 1x1 黑色 JPEG 作为初始帧，确保 img 标签立即开始渲染
         _black_jpeg = (
             b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'
             b'\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t'
@@ -835,37 +865,49 @@ async def camera_stream(task_id: str):
         last_mtime = 0.0
         target_interval = 0.04  # ~25fps
         loop = asyncio.get_event_loop()
+        no_frame_count = 0
 
-        while task_id in _task_status and _task_status[task_id]["status"] == "running":
+        while True:
+            # 检查任务是否还在运行
+            async with _state_lock:
+                task = _task_status.get(task_id)
+                if not task or task["status"] != "running":
+                    break
+
             t0 = loop.time()
 
             if frame_file.exists():
                 try:
-                    # 只检查修改时间，避免每轮都 read_bytes 整个文件
                     stat = await loop.run_in_executor(None, frame_file.stat)
                     mtime = stat.st_mtime
 
                     if mtime != last_mtime:
                         last_mtime = mtime
-                        # 有新帧，异步读取（不阻塞事件循环）
+                        no_frame_count = 0
                         frame_data = await loop.run_in_executor(None, frame_file.read_bytes)
                         if frame_data:
                             yield (
                                 f"{boundary}\r\n"
                                 f"Content-Type: image/jpeg\r\n\r\n"
                             ).encode() + frame_data + b"\r\n"
-                    # mtime 相同 → 同一帧，跳过，直接等下一轮
+                    else:
+                        no_frame_count += 1
+                        # 超过 5 秒无新帧（~125 次循环），发送心跳避免连接超时
+                        if no_frame_count > 125:
+                            no_frame_count = 0
+                            yield (
+                                f"{boundary}\r\n"
+                                f"Content-Type: image/jpeg\r\n\r\n"
+                            ).encode() + _black_jpeg + b"\r\n"
                 except (OSError, FileNotFoundError):
                     await asyncio.sleep(0.01)
                     continue
             else:
-                # 发送黑色占位图
                 yield (
                     f"{boundary}\r\n"
                     f"Content-Type: image/jpeg\r\n\r\n"
                 ).encode() + _black_jpeg + b"\r\n"
 
-            # 动态 sleep：减去本轮实际耗时，保持稳定帧率
             elapsed = loop.time() - t0
             sleep_time = max(0.005, target_interval - elapsed)
             await asyncio.sleep(sleep_time)
@@ -882,6 +924,16 @@ async def camera_stream(task_id: str):
 async def start_browser_camera(req: BrowserCameraStartRequest):
     """启动浏览器摄像头 Pipeline（等待 WebSocket 推流）"""
     _ensure_dirs()
+
+    # 并发控制
+    sem = _get_semaphore()
+    if sem.locked():
+        running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+        raise HTTPException(
+            status_code=429,
+            detail=f"已有 {running_count} 个 Pipeline 在运行（上限 {_MAX_PARALLEL_PIPELINES}），请等待完成后再试",
+        )
+
     config = load_config()
     pipeline_cfg = config.get("pipeline", {})
 
@@ -923,19 +975,21 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
     logger.info("启动浏览器摄像头 Pipeline: %s", " ".join(cmd))
 
-    _task_status[task_id] = {
-        "task_id": task_id,
-        "status": "running",
-        "video_filename": f"浏览器摄像头 ({task_id})",
-        "output_filename": None,
-        "output_path": None,
-        "progress": "等待摄像头连接...",
-        "error": None,
-        "is_camera": True,
-        "is_browser_camera": True,
-    }
+    async with _state_lock:
+        _task_status[task_id] = {
+            "task_id": task_id,
+            "status": "running",
+            "video_filename": f"浏览器摄像头 ({task_id})",
+            "output_filename": None,
+            "output_path": None,
+            "progress": "等待摄像头连接...",
+            "error": None,
+            "is_camera": True,
+            "is_browser_camera": True,
+        }
 
     try:
+        await sem.acquire()
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -943,11 +997,14 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             cwd=str(Path.cwd()),
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
         )
-        _running_processes[task_id] = process
-        asyncio.create_task(_wait_pipeline(task_id, process, output_filename))
+        async with _state_lock:
+            _running_processes[task_id] = process
+        asyncio.create_task(_wait_pipeline(task_id, process, sem))
     except FileNotFoundError:
-        _task_status[task_id]["status"] = "failed"
-        _task_status[task_id]["error"] = "pipeline 模块不存在"
+        sem.release()
+        async with _state_lock:
+            _task_status[task_id]["status"] = "failed"
+            _task_status[task_id]["error"] = "pipeline 模块不存在"
         raise HTTPException(status_code=500, detail="pipeline 模块不存在")
 
     return PipelineStartResponse(
@@ -960,15 +1017,17 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 @router.websocket("/ws/camera/{task_id}")
 async def browser_camera_ws(websocket: WebSocket, task_id: str):
     """WebSocket 端点 — 接收浏览器摄像头 JPEG 帧"""
-    if task_id not in _task_status:
-        await websocket.close(code=4004, reason="任务不存在")
-        return
+    async with _state_lock:
+        if task_id not in _task_status:
+            await websocket.close(code=4004, reason="任务不存在")
+            return
 
     frames_dir = _get_browser_frames_dir(task_id)
     await websocket.accept()
     logger.info("浏览器摄像头 WebSocket 已连接: %s", task_id)
 
-    _task_status[task_id]["progress"] = "摄像头已连接，推流中..."
+    async with _state_lock:
+        _task_status[task_id]["progress"] = "摄像头已连接，推流中..."
 
     frame_count = 0
     try:
