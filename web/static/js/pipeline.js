@@ -505,6 +505,10 @@ function loadResultVideo(filename) {
 
   const url = `${PIPE_API}/outputs/${encodeURIComponent(filename)}`;
 
+  // 先隐藏视频，显示占位符
+  resultVideo.style.display = 'none';
+  if (resultPlaceholder) resultPlaceholder.style.display = '';
+
   // 直接设置 src，通过 onerror 检测加载失败
   resultVideo.onerror = function () {
     showToast('结果视频加载失败: ' + filename, 'error');
@@ -616,62 +620,61 @@ async function startBrowserCamera() {
 
     cameraTaskId = data.task_id;
 
-    // 3. 建立 WebSocket 推流
+    // 3. 建立 WebSocket 推流（提取为函数，支持重连复用）
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
+
+    function setupWsHandlers(ws) {
+      ws.onopen = () => {
+        showToast('摄像头已连接，开始推流');
+        document.getElementById('cameraStatusCard').style.display = '';
+        updateCameraStatus('running', '浏览器摄像头推流中...');
+        document.getElementById('btnStartCamera').style.display = 'none';
+        document.getElementById('btnStopCamera').style.display = '';
+
+        // 设置 MJPEG 实时流画面
+        const cameraStream = document.getElementById('cameraStream');
+        const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
+        if (cameraStream) {
+          cameraStream.src = `${PIPE_API}/stream/${cameraTaskId}`;
+          cameraStream.style.display = '';
+          if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
+        }
+
+        // 开始捕获帧（传入当前 ws 实例）
+        startFrameCapture(ws, stream);
+        startCameraPolling();
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (!msg.ok) console.warn('帧发送失败:', msg.error);
+        } catch {}
+      };
+
+      ws.onerror = () => {
+        console.warn('WebSocket 错误');
+      };
+
+      ws.onclose = (evt) => {
+        if (!cameraTaskId) return;
+        console.warn('WebSocket 断开, code:', evt.code);
+        if (evt.code !== 1000 && cameraTaskId) {
+          showToast('摄像头连接断开，尝试重连…', 'info');
+          setTimeout(() => {
+            if (!cameraTaskId) return;
+            const newWs = new WebSocket(wsUrl);
+            browserCameraWs = newWs;
+            setupWsHandlers(newWs);  // 递归设置，新 ws 实例正确传入
+          }, 2000);
+        }
+      };
+    }
+
     const ws = new WebSocket(wsUrl);
     browserCameraWs = ws;
-
-    ws.onopen = () => {
-      showToast('摄像头已连接，开始推流');
-      document.getElementById('cameraStatusCard').style.display = '';
-      updateCameraStatus('running', '浏览器摄像头推流中...');
-      document.getElementById('btnStartCamera').style.display = 'none';
-      document.getElementById('btnStopCamera').style.display = '';
-
-      // 设置 MJPEG 实时流画面
-      const cameraStream = document.getElementById('cameraStream');
-      const cameraPlaceholder = document.getElementById('cameraStreamPlaceholder');
-      if (cameraStream) {
-        cameraStream.src = `${PIPE_API}/stream/${cameraTaskId}`;
-        cameraStream.style.display = '';
-        if (cameraPlaceholder) cameraPlaceholder.style.display = 'none';
-      }
-
-      // 开始捕获帧
-      startFrameCapture(ws, stream);
-      startCameraPolling();
-    };
-
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (!msg.ok) console.warn('帧发送失败:', msg.error);
-      } catch {}
-    };
-
-    ws.onerror = () => {
-      console.warn('WebSocket 错误');
-    };
-
-    ws.onclose = (evt) => {
-      // 正常停止（用户点了停止）时不报错
-      if (!cameraTaskId) return;
-      console.warn('WebSocket 断开, code:', evt.code);
-      // 意外断开 — 尝试重连一次
-      if (evt.code !== 1000 && cameraTaskId) {
-        showToast('摄像头连接断开，尝试重连…', 'info');
-        setTimeout(() => {
-          if (!cameraTaskId) return; // 已被停止
-          const newWs = new WebSocket(wsUrl);
-          browserCameraWs = newWs;
-          newWs.onopen = ws.onopen;
-          newWs.onmessage = ws.onmessage;
-          newWs.onerror = ws.onerror;
-          newWs.onclose = ws.onclose;
-        }, 2000);
-      }
-    };
+    setupWsHandlers(ws);
 
   } catch (e) {
     showToast('启动失败: ' + e.message, 'error');

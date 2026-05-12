@@ -371,13 +371,18 @@ async def upload_video(file: UploadFile = File(...)):
 
 @router.delete("/videos/{filename}")
 async def delete_video(filename: str):
-    """删除 demo 视频"""
+    """删除 demo 视频（同时清理转码缓存）"""
     filename = _safe_filename(filename)
     demo_dir = _get_demo_dir()
     video_path = demo_dir / filename
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"视频不存在: {filename}")
     video_path.unlink()
+    # 清理转码缓存
+    transcoded = demo_dir / "_transcoded" / filename
+    if transcoded.exists():
+        transcoded.unlink()
+        logger.info("已清理转码缓存: %s", transcoded)
     return {"success": True, "message": f"已删除: {filename}"}
 
 
@@ -614,11 +619,12 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, outp
     finally:
         _running_processes.pop(task_id, None)
         _stop_signals.discard(task_id)
-        # 浏览器摄像头的帧目录由 WebSocket 断开后的 _delayed_cleanup 管理，
-        # 这里不要提前清理，否则 MJPEG 流和 WebSocket 写入会因目录消失而中断
+        # 浏览器摄像头的帧目录由 WebSocket 断开后的 _delayed_cleanup 管理
         is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
         if not is_browser_cam:
             _cleanup_stream_dir(task_id)
+        # 定期清理旧任务记录
+        _cleanup_old_tasks()
 
 
 @router.get("/status", response_model=PipelineStatusResponse)
@@ -703,6 +709,21 @@ async def stop_pipeline(task_id: str):
     _cleanup_stream_dir(task_id)
 
     return {"success": True, "message": f"已停止任务: {task_id}"}
+
+
+def _cleanup_old_tasks():
+    """清理已完成/失败的旧任务记录，防止内存泄漏"""
+    global _task_status
+    if len(_task_status) > 100:
+        # 保留运行中的 + 最近 50 条
+        running = {k: v for k, v in _task_status.items() if v["status"] == "running"}
+        finished = sorted(
+            [(k, v) for k, v in _task_status.items() if v["status"] != "running"],
+            key=lambda x: x[1].get("task_id", ""),
+            reverse=True,
+        )[:50]
+        _task_status = {**running, **dict(finished)}
+        logger.info("自动清理旧任务记录，保留 %d 条", len(_task_status))
 
 
 def _cleanup_stream_dir(task_id: str):
