@@ -36,6 +36,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--yolo-model", default="yolov8n.pt")
     p.add_argument("--device", default="", help="cpu / 0 / 1 ...")
     p.add_argument("--conf", type=float, default=0.25, help="检测置信度")
+    p.add_argument("--iou", type=float, default=0.45, help="NMS IoU 阈值")
     p.add_argument("--detect-every", type=int, default=1, help="每隔 N 帧检测一次")
     p.add_argument("--camera", action="store_true", help="摄像头模式")
     p.add_argument("--frames-dir", default=None,
@@ -98,6 +99,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     yolo_model_path = args.yolo_model or pipeline_cfg.get("yolo_model", "yolov8n.pt")
     device = args.device or pipeline_cfg.get("device", "")
     conf_threshold = args.conf or pipeline_cfg.get("conf_threshold", 0.25)
+    iou_threshold = args.iou if args.iou is not None else pipeline_cfg.get("iou_threshold", 0.45)
     detect_every = args.detect_every or pipeline_cfg.get("detect_every_n_frames", 1)
     detect_classes = pipeline_cfg.get("detect_classes", [8])
 
@@ -278,6 +280,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 track_kwargs: dict = dict(
                     persist=True,
                     conf=conf_threshold,
+                    iou=iou_threshold,
                     classes=detect_classes,
                     verbose=False,
                 )

@@ -214,6 +214,41 @@ async function deleteVideo(filename) {
 }
 
 // ── Pipeline 控制 ──
+
+/** 收集视频 Demo 页的 pipeline 参数 */
+function collectVideoParams() {
+  return {
+    conf_threshold: parseFloat(document.getElementById('optConf').value),
+    iou_threshold: parseFloat(document.getElementById('optIou').value),
+    process_every: parseInt(document.getElementById('optProcessEvery').value, 10),
+    detect_every: parseInt(document.getElementById('optDetectEvery').value, 10),
+    max_frames: parseInt(document.getElementById('optMaxFrames').value, 10) || 0,
+    device: document.getElementById('optDevice').value,
+    yolo_model: document.getElementById('optYoloModel').value.trim(),
+    prompt_mode: document.getElementById('optPromptMode').value,
+    enable_refresh: document.getElementById('optEnableRefresh').checked,
+    gap_num: parseInt(document.getElementById('optGapNum').value, 10) || 150,
+    max_concurrent: parseInt(document.getElementById('optMaxConcurrent').value, 10) || 4,
+  };
+}
+
+/** 收集摄像头页的 pipeline 参数 */
+function collectCameraParams() {
+  return {
+    conf_threshold: parseFloat(document.getElementById('camConf').value),
+    iou_threshold: parseFloat(document.getElementById('camIou').value),
+    process_every: parseInt(document.getElementById('camProcessEvery').value, 10),
+    detect_every: parseInt(document.getElementById('camDetectEvery').value, 10),
+    max_frames: parseInt(document.getElementById('camMaxFrames').value, 10) || 0,
+    device: document.getElementById('camDevice').value,
+    yolo_model: document.getElementById('camYoloModel').value.trim(),
+    prompt_mode: document.getElementById('camPromptMode').value,
+    enable_refresh: document.getElementById('camEnableRefresh').checked,
+    gap_num: parseInt(document.getElementById('camGapNum').value, 10) || 150,
+    max_concurrent: parseInt(document.getElementById('camMaxConcurrent').value, 10) || 4,
+  };
+}
+
 async function startVideoPipeline() {
   if (!selectedVideo) { showToast('请先选择视频', 'error'); return; }
 
@@ -229,6 +264,7 @@ async function startVideoPipeline() {
         video_filename: selectedVideo,
         use_agent: document.getElementById('optAgent').checked,
         concurrent_mode: document.getElementById('optConcurrent').checked,
+        ...collectVideoParams(),
       }),
     });
     const data = await resp.json();
@@ -491,6 +527,7 @@ async function startBrowserCamera() {
       body: JSON.stringify({
         use_agent: document.getElementById('camOptAgent').checked,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
+        ...collectCameraParams(),
       }),
     });
     const data = await resp.json();
@@ -647,6 +684,7 @@ async function startCameraPipeline() {
         use_agent: document.getElementById('camOptAgent').checked,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
         display: document.getElementById('camOptDisplay').checked,
+        ...collectCameraParams(),
       }),
     });
     const data = await resp.json();

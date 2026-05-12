@@ -122,6 +122,71 @@
         </label>
       </div>
 
+      <!-- 核心参数 -->
+      <div class="param-grid">
+        <div class="param-item">
+          <label>置信度阈值 <span class="param-val" id="optConfVal">0.25</span></label>
+          <input type="range" id="optConf" min="0.05" max="0.95" step="0.05" value="0.25"
+                 oninput="document.getElementById('optConfVal').textContent=this.value" />
+        </div>
+        <div class="param-item">
+          <label>IoU 阈值 <span class="param-val" id="optIouVal">0.45</span></label>
+          <input type="range" id="optIou" min="0.1" max="0.95" step="0.05" value="0.45"
+                 oninput="document.getElementById('optIouVal').textContent=this.value" />
+        </div>
+        <div class="param-item">
+          <label>VLM 推理间隔 (帧)</label>
+          <input type="number" id="optProcessEvery" value="15" min="1" max="1000" />
+        </div>
+        <div class="param-item">
+          <label>检测间隔 (帧)</label>
+          <input type="number" id="optDetectEvery" value="2" min="1" max="100" />
+        </div>
+      </div>
+
+      <!-- 高级参数 (折叠) -->
+      <details class="advanced-params">
+        <summary>⚙️ 高级参数</summary>
+        <div class="param-grid">
+          <div class="param-item">
+            <label>最大处理帧数 (0=不限)</label>
+            <input type="number" id="optMaxFrames" value="0" min="0" />
+          </div>
+          <div class="param-item">
+            <label>计算设备</label>
+            <select id="optDevice">
+              <option value="">自动</option>
+              <option value="cpu">CPU</option>
+              <option value="0">GPU 0</option>
+            </select>
+          </div>
+          <div class="param-item">
+            <label>YOLO 模型</label>
+            <input type="text" id="optYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
+          </div>
+          <div class="param-item">
+            <label>VLM 提示模式</label>
+            <select id="optPromptMode">
+              <option value="detailed">详细</option>
+              <option value="brief">简洁</option>
+            </select>
+          </div>
+          <div class="param-item">
+            <label>最大并发数</label>
+            <input type="number" id="optMaxConcurrent" value="4" min="1" max="16" />
+          </div>
+          <div class="param-item">
+            <label>刷新间隔 (帧)</label>
+            <input type="number" id="optGapNum" value="150" min="1" />
+          </div>
+          <div class="param-item param-checkbox">
+            <label class="checkbox-label">
+              <input type="checkbox" id="optEnableRefresh" /> 定时刷新识别
+            </label>
+          </div>
+        </div>
+      </details>
+
       <!-- 状态 -->
       <div id="pipelineStatus" class="pipeline-status">
         <span class="status-dot idle"></span>
@@ -205,6 +270,74 @@
             </label>
           </div>
         </div>
+
+        <!-- 核心参数 -->
+        <div class="form-row">
+          <label>检测参数</label>
+          <div class="param-grid">
+            <div class="param-item">
+              <label>置信度阈值 <span class="param-val" id="camConfVal">0.25</span></label>
+              <input type="range" id="camConf" min="0.05" max="0.95" step="0.05" value="0.25"
+                     oninput="document.getElementById('camConfVal').textContent=this.value" />
+            </div>
+            <div class="param-item">
+              <label>IoU 阈值 <span class="param-val" id="camIouVal">0.45</span></label>
+              <input type="range" id="camIou" min="0.1" max="0.95" step="0.05" value="0.45"
+                     oninput="document.getElementById('camIouVal').textContent=this.value" />
+            </div>
+            <div class="param-item">
+              <label>VLM 推理间隔 (帧)</label>
+              <input type="number" id="camProcessEvery" value="15" min="1" max="1000" />
+            </div>
+            <div class="param-item">
+              <label>检测间隔 (帧)</label>
+              <input type="number" id="camDetectEvery" value="2" min="1" max="100" />
+            </div>
+          </div>
+        </div>
+
+        <!-- 高级参数 (折叠) -->
+        <details class="advanced-params">
+          <summary>⚙️ 高级参数</summary>
+          <div class="param-grid">
+            <div class="param-item">
+              <label>最大处理帧数 (0=不限)</label>
+              <input type="number" id="camMaxFrames" value="0" min="0" />
+            </div>
+            <div class="param-item">
+              <label>计算设备</label>
+              <select id="camDevice">
+                <option value="">自动</option>
+                <option value="cpu">CPU</option>
+                <option value="0">GPU 0</option>
+              </select>
+            </div>
+            <div class="param-item">
+              <label>YOLO 模型</label>
+              <input type="text" id="camYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
+            </div>
+            <div class="param-item">
+              <label>VLM 提示模式</label>
+              <select id="camPromptMode">
+                <option value="detailed">详细</option>
+                <option value="brief">简洁</option>
+              </select>
+            </div>
+            <div class="param-item">
+              <label>最大并发数</label>
+              <input type="number" id="camMaxConcurrent" value="4" min="1" max="16" />
+            </div>
+            <div class="param-item">
+              <label>刷新间隔 (帧)</label>
+              <input type="number" id="camGapNum" value="150" min="1" />
+            </div>
+            <div class="param-item param-checkbox">
+              <label class="checkbox-label">
+                <input type="checkbox" id="camEnableRefresh" /> 定时刷新识别
+              </label>
+            </div>
+          </div>
+        </details>
         <div class="form-actions">
           <button class="btn btn-primary" id="btnStartCamera" onclick="startCameraPipeline()">▶ 启动摄像头识别</button>
           <button class="btn btn-danger" id="btnStopCamera" onclick="stopCameraPipeline()" style="display:none">⏹ 停止</button>

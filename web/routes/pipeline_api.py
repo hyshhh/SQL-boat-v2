@@ -63,11 +63,37 @@ class PipelineStartRequest(BaseModel):
     use_agent: bool = False
     concurrent_mode: bool = True
     display: bool = False
+    # ── 核心检测参数 ──
+    conf_threshold: float = 0.25
+    iou_threshold: float = 0.45
+    process_every: int = 15
+    detect_every: int = 2
+    # ── 高级参数 ──
+    max_frames: int = 0
+    device: str = ""
+    yolo_model: str = ""
+    prompt_mode: str = "detailed"
+    enable_refresh: bool = False
+    gap_num: int = 150
+    max_concurrent: int = 4
 
 
 class BrowserCameraStartRequest(BaseModel):
     use_agent: bool = False
     concurrent_mode: bool = True
+    # ── 核心检测参数 ──
+    conf_threshold: float = 0.25
+    iou_threshold: float = 0.45
+    process_every: int = 15
+    detect_every: int = 2
+    # ── 高级参数 ──
+    max_frames: int = 0
+    device: str = ""
+    yolo_model: str = ""
+    prompt_mode: str = "detailed"
+    enable_refresh: bool = False
+    gap_num: int = 150
+    max_concurrent: int = 4
 
 
 class PipelineStartResponse(BaseModel):
@@ -280,7 +306,27 @@ async def start_pipeline(req: PipelineStartRequest):
     if req.use_agent:
         cmd.append("--agent")
     if req.concurrent_mode:
-        cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
+        cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
+
+    # ── 核心检测参数 ──
+    cmd.extend(["--conf", str(req.conf_threshold)])
+    cmd.extend(["--iou", str(req.iou_threshold)])
+    cmd.extend(["--process-every", str(req.process_every)])
+    cmd.extend(["--detect-every", str(req.detect_every)])
+
+    # ── 高级参数 ──
+    if req.max_frames > 0:
+        cmd.extend(["--max-frames", str(req.max_frames)])
+    if req.device:
+        cmd.extend(["--device", req.device])
+    if req.yolo_model:
+        cmd.extend(["--yolo-model", req.yolo_model])
+    if req.prompt_mode:
+        cmd.extend(["--prompt-mode", req.prompt_mode])
+    if req.enable_refresh:
+        cmd.append("--enable-refresh")
+        cmd.extend(["--gap-num", str(req.gap_num)])
+
     if is_camera:
         cmd.append("--camera")
         # 摄像头模式：通过 stream-dir 实现 MJPEG 流，不需要 --display
@@ -543,7 +589,26 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
     if req.use_agent:
         cmd.append("--agent")
     if req.concurrent_mode:
-        cmd.extend(["-c", "--max-concurrent", str(pipeline_cfg.get("max_concurrent", 4))])
+        cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
+
+    # ── 核心检测参数 ──
+    cmd.extend(["--conf", str(req.conf_threshold)])
+    cmd.extend(["--iou", str(req.iou_threshold)])
+    cmd.extend(["--process-every", str(req.process_every)])
+    cmd.extend(["--detect-every", str(req.detect_every)])
+
+    # ── 高级参数 ──
+    if req.max_frames > 0:
+        cmd.extend(["--max-frames", str(req.max_frames)])
+    if req.device:
+        cmd.extend(["--device", req.device])
+    if req.yolo_model:
+        cmd.extend(["--yolo-model", req.yolo_model])
+    if req.prompt_mode:
+        cmd.extend(["--prompt-mode", req.prompt_mode])
+    if req.enable_refresh:
+        cmd.append("--enable-refresh")
+        cmd.extend(["--gap-num", str(req.gap_num)])
 
     logger.info("启动浏览器摄像头 Pipeline: %s", " ".join(cmd))
 
