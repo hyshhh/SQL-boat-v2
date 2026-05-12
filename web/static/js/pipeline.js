@@ -173,12 +173,27 @@ function selectVideo(filename, el) {
 }
 
 function playSourceVideo(filename) {
+  // 关键修复：设置 selectedVideo，确保后续 pipeline 启动能找到视频
+  selectedVideo = filename;
+
   const video = document.getElementById('sourceVideo');
   if (!video) return;
-  video.src = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
-  video.load();
+
+  // 更新视频列表选中状态（预览按钮直接调用时也需要高亮）
+  document.querySelectorAll('.video-item').forEach(item => {
+    const nameEl = item.querySelector('.video-item-name');
+    item.classList.toggle('selected', nameEl && nameEl.textContent === filename);
+  });
+
   // 确保 pipelineControl 可见
   document.getElementById('pipelineControl').style.display = '';
+
+  // 设置视频源并尝试自动播放
+  video.src = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
+  video.load();
+  video.play().catch(() => {
+    // 浏览器可能阻止自动播放，用户可手动点击播放
+  });
 }
 
 async function deleteVideo(filename) {
