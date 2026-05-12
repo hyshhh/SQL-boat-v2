@@ -303,7 +303,6 @@ function connectStreamWs(taskId) {
       if (evt.data instanceof ArrayBuffer) {
         const view = new DataView(evt.data);
         const msgType = view.getUint8(0);
-        const msgLen = view.getUint32(1, false); // big-endian
         const payload = evt.data.slice(5);
 
         if (msgType === 0x01) {
@@ -314,11 +313,30 @@ function connectStreamWs(taskId) {
             _h264SourceBuffer = sb;
 
             sb.addEventListener('updateend', () => {
+              // 主动清理已播放的缓冲区，防止内存膨胀
+              try {
+                const videoEl = document.getElementById('streamVideo');
+                if (videoEl && sb.buffered.length > 0) {
+                  const start = sb.buffered.start(0);
+                  const end = sb.buffered.end(0);
+                  const currentTime = videoEl.currentTime;
+                  // 保留当前播放位置前 5 秒 + 后面所有数据
+                  if (currentTime - start > 10) {
+                    sb.remove(start, Math.max(start, currentTime - 5));
+                    return; // remove 会再次触发 updateend，届时再处理队列
+                  }
+                }
+              } catch (e) {}
               // 处理队列中积压的数据
               if (_h264Queue.length > 0 && !sb.updating) {
                 try {
                   sb.appendBuffer(_h264Queue.shift());
-                } catch (e) {}
+                } catch (e) {
+                  if (e.name === 'QuotaExceededError') {
+                    // 缓冲区满，丢弃队列中所有旧数据，只保留最新的
+                    _h264Queue.length = 0;
+                  }
+                }
               }
             });
 
@@ -331,14 +349,26 @@ function connectStreamWs(taskId) {
           // Media segment (moof+mdat)
           if (_h264SourceBuffer) {
             if (_h264SourceBuffer.updating) {
-              // 限制队列大小，避免内存爆炸
-              if (_h264Queue.length < 10) {
-                _h264Queue.push(payload);
+              if (_h264Queue.length >= 10) {
+                // 队列满了，丢掉旧帧只保留最新的
+                _h264Queue.length = 0;
               }
+              _h264Queue.push(payload);
             } else {
               try {
                 _h264SourceBuffer.appendBuffer(payload);
-              } catch (e) {}
+              } catch (e) {
+                if (e.name === 'QuotaExceededError') {
+                  // 缓冲区满，尝试清理后重试
+                  try {
+                    const videoEl = document.getElementById('streamVideo');
+                    const sb = _h264SourceBuffer;
+                    if (videoEl && sb.buffered.length > 0) {
+                      sb.remove(sb.buffered.start(0), Math.max(sb.buffered.start(0), videoEl.currentTime - 2));
+                    }
+                  } catch (e2) {}
+                }
+              }
             }
           }
 
@@ -954,8 +984,22 @@ function connectCameraH264(taskId) {
             const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42C01F"');
             _camH264SourceBuffer = sb;
             sb.addEventListener('updateend', () => {
+              // 主动清理已播放的缓冲区
+              try {
+                const videoEl = document.getElementById('cameraStream');
+                if (videoEl && sb.buffered.length > 0) {
+                  const start = sb.buffered.start(0);
+                  const currentTime = videoEl.currentTime;
+                  if (currentTime - start > 10) {
+                    sb.remove(start, Math.max(start, currentTime - 5));
+                    return;
+                  }
+                }
+              } catch (e) {}
               if (_camH264Queue.length > 0 && !sb.updating) {
-                try { sb.appendBuffer(_camH264Queue.shift()); } catch (e) {}
+                try { sb.appendBuffer(_camH264Queue.shift()); } catch (e) {
+                  if (e.name === 'QuotaExceededError') _camH264Queue.length = 0;
+                }
               }
             });
             sb.appendBuffer(payload);
@@ -966,9 +1010,20 @@ function connectCameraH264(taskId) {
           // Media segment
           if (_camH264SourceBuffer) {
             if (_camH264SourceBuffer.updating) {
-              if (_camH264Queue.length < 10) _camH264Queue.push(payload);
+              if (_camH264Queue.length >= 10) _camH264Queue.length = 0;
+              _camH264Queue.push(payload);
             } else {
-              try { _camH264SourceBuffer.appendBuffer(payload); } catch (e) {}
+              try { _camH264SourceBuffer.appendBuffer(payload); } catch (e) {
+                if (e.name === 'QuotaExceededError') {
+                  try {
+                    const videoEl = document.getElementById('cameraStream');
+                    const sb = _camH264SourceBuffer;
+                    if (videoEl && sb.buffered.length > 0) {
+                      sb.remove(sb.buffered.start(0), Math.max(sb.buffered.start(0), videoEl.currentTime - 2));
+                    }
+                  } catch (e2) {}
+                }
+              }
             }
           }
           frameCount++;

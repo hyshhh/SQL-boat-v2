@@ -916,10 +916,10 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         "-preset", "ultrafast", "-tune", "zerolatency",
         "-profile:v", "baseline", "-level", "3.1",
         "-bf", "0",        # 无 B 帧（降低延迟）
-        "-g", "60",        # GOP = 60 帧（每 4 秒一个关键帧）
+        "-g", "30",        # GOP = 30 帧（每 2 秒一个关键帧）
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-frag_duration", "2000000",  # 2 秒一个 fragment（减少 MSE 重解码频率）
+        "-frag_duration", "1000000",  # 1 秒一个 fragment（降低延迟）
         "-flush_packets", "1",
         "-f", "mp4",
         "pipe:1",
@@ -930,6 +930,8 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         _h264_streams[task_id] = {
             "ffmpeg": None,
             "viewers": set(),
+            "viewer_queues": {},    # ws → asyncio.Queue（每观众独立队列）
+            "viewer_tasks": {},     # ws → asyncio.Task（每观众独立发送任务）
             "init_segment": None,
             "latest_segments": [],
             "max_segments": 30,
@@ -996,7 +998,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
             nonlocal box_buffer, init_sent, running
             try:
                 while running:
-                    chunk = await ffmpeg_proc.stdout.read(65536)
+                    chunk = await ffmpeg_proc.stdout.read(262144)  # 256KB buffer
                     if not chunk:
                         break
                     box_buffer += chunk
@@ -1054,30 +1056,63 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         logger.info("H.264 推流结束: %s", task_id)
 
 
+async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
+    """每观众独立发送任务：从队列取数据发送，慢观众自动丢帧"""
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # 队列空闲 5 秒，检查任务状态
+                async with _state_lock:
+                    task = _task_status.get(task_id)
+                if not task or task["status"] != "running":
+                    break
+                continue
+            try:
+                await asyncio.wait_for(ws.send_bytes(data), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.debug("观众发送超时，断开: %s", task_id)
+                break
+            except Exception:
+                break
+    except asyncio.CancelledError:
+        pass
+    finally:
+        # 清理
+        async with _state_lock:
+            stream = _h264_streams.get(task_id)
+            if stream:
+                stream["viewers"].discard(ws)
+                stream["viewer_queues"].pop(ws, None)
+                stream["viewer_tasks"].pop(ws, None)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 async def _broadcast_h264(task_id: str, data: bytes):
-    """向所有观看此 task 的 WebSocket 客户端广播 fMP4 数据"""
+    """向所有观众广播 fMP4 数据（非阻塞，每观众独立队列，慢观众自动丢帧）"""
     async with _state_lock:
         stream = _h264_streams.get(task_id)
         if not stream:
             return
-        viewers = list(stream["viewers"])
+        queues = list(stream["viewer_queues"].values())
 
-    if not viewers:
-        return
-
-    disconnected = []
-    for ws in viewers:
+    for q in queues:
         try:
-            await ws.send_bytes(data)
-        except Exception:
-            disconnected.append(ws)
-
-    if disconnected:
-        async with _state_lock:
-            stream = _h264_streams.get(task_id)
-            if stream:
-                for ws in disconnected:
-                    stream["viewers"].discard(ws)
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            # 队列满了，丢掉最旧的帧
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
 
 
 async def _stop_h264_stream(task_id: str):
@@ -1086,6 +1121,9 @@ async def _stop_h264_stream(task_id: str):
         stream = _h264_streams.pop(task_id, None)
     if not stream:
         return
+    # 取消所有观众发送任务
+    for task in list(stream.get("viewer_tasks", {}).values()):
+        task.cancel()
     # 通知所有客户端
     for ws in list(stream.get("viewers", [])):
         try:
@@ -1119,20 +1157,32 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
             await websocket.close(code=4004, reason="推流未就绪")
             return
         stream["viewers"].add(websocket)
+        # 创建此观众的独立队列和发送任务
+        q: asyncio.Queue = asyncio.Queue(maxsize=30)
+        stream["viewer_queues"][websocket] = q
+        sender_task = asyncio.create_task(_viewer_sender(websocket, q, task_id))
+        stream["viewer_tasks"][websocket] = sender_task
 
     try:
         # 发送初始化段（如果已有）
         init_seg = stream.get("init_segment")
         if init_seg:
-            await websocket.send_bytes(b"\x01" + len(init_seg).to_bytes(4, "big") + init_seg)
+            msg = b"\x01" + len(init_seg).to_bytes(4, "big") + init_seg
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass
 
         # 发送最近的媒体段（避免新客户端黑屏）
         for seg in stream.get("latest_segments", []):
-            await websocket.send_bytes(b"\x02" + len(seg).to_bytes(4, "big") + seg)
+            msg = b"\x02" + len(seg).to_bytes(4, "big") + seg
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass
 
-        # 保持连接，等待后续帧
+        # 保持连接，等待任务结束
         while True:
-            # 检查任务状态
             async with _state_lock:
                 task = _task_status.get(task_id)
                 if not task or task["status"] != "running":
@@ -1145,10 +1195,15 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
         if "AssertionError" not in str(type(e).__name__):
             logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
     finally:
+        # 清理：取消发送任务，移除队列
         async with _state_lock:
             stream = _h264_streams.get(task_id)
             if stream:
                 stream["viewers"].discard(websocket)
+                st = stream["viewer_tasks"].pop(websocket, None)
+                stream["viewer_queues"].pop(websocket, None)
+        if st:
+            st.cancel()
 
 
 # ── WebSocket JPEG 推流（兼容） ──
