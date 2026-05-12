@@ -854,13 +854,18 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process):
     ffmpeg_args = [
         ffmpeg_cmd, "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-video_size", f"{w}x{h}",
+        "-r", "15",  # 输入帧率（匹配 pipeline 实际输出速率）
         "-i", "pipe:0",
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-        "-profile:v", "baseline", "-level", "3.0",
-        "-bf", "0", "-g", "30",
+        "-c:v", "libx264",
+        "-preset", "ultrafast", "-tune", "zerolatency",
+        "-profile:v", "baseline", "-level", "3.1",
+        "-bf", "0",        # 无 B 帧（降低延迟）
+        "-g", "60",        # GOP = 60 帧（每 4 秒一个关键帧）
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-f", "mp4", "-frag_duration", "500000",
+        "-frag_duration", "2000000",  # 2 秒一个 fragment（减少 MSE 重解码频率）
+        "-flush_packets", "1",
+        "-f", "mp4",
         "pipe:1",
     ]
 
@@ -1062,7 +1067,8 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
+        if "AssertionError" not in str(type(e).__name__):
+            logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
     finally:
         async with _state_lock:
             stream = _h264_streams.get(task_id)
@@ -1148,7 +1154,9 @@ async def ws_stream(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.debug("WebSocket 推流异常 [%s]: %s", task_id, e)
+        # 抑制 websockets 库的 drain/ping 断言错误（客户端异常断开时触发）
+        if "AssertionError" not in str(type(e).__name__):
+            logger.debug("WebSocket 推流异常 [%s]: %s", task_id, e)
     finally:
         # 注销观众
         async with _state_lock:
@@ -1380,7 +1388,8 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         logger.info("浏览器摄像头 WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
     except Exception as e:
-        logger.error("浏览器摄像头 WebSocket 异常: %s", e)
+        if "AssertionError" not in str(type(e).__name__):
+            logger.error("浏览器摄像头 WebSocket 异常: %s", e)
     finally:
         # WebSocket 断开 → 标记断开，但不立即终止 pipeline
         # pipeline 会因帧目录被删/无新帧而自动退出

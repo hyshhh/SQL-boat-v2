@@ -309,7 +309,7 @@ function connectStreamWs(taskId) {
         if (msgType === 0x01) {
           // Init segment (moov) — 创建 SourceBuffer
           try {
-            const codecs = 'avc1.42C01E'; // H.264 Baseline 3.0
+            const codecs = 'avc1.42C01F'; // H.264 Constrained Baseline Level 3.1
             const sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
             _h264SourceBuffer = sb;
 
