@@ -1765,13 +1765,14 @@ async def _receive_h264_camera_frames(
     ffmpeg_bin = _find_binary("ffmpeg") or "ffmpeg"
     ffmpeg_cmd = [
         ffmpeg_bin, "-hide_banner", "-loglevel", "info",  # info 级别以便排查错误
+        "-err_detect", "ignore_err",  # 容忍 VP9 等编码的解码小错误
         "-fflags", "+nobuffer+discardcorrupt",
         "-flags", "+low_delay",
         *ffmpeg_input_args,
         "-i", "pipe:0",
+        "-vf", "scale=640:480",  # 强制输出目标分辨率
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
-        "-video_size", "640x480",
         "pipe:1",
     ]
 
