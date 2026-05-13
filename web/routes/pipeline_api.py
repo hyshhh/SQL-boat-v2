@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1400,7 +1402,14 @@ async def camera_stream(task_id: str):
 
 @router.post("/start-browser-camera", response_model=PipelineStartResponse)
 async def start_browser_camera(req: BrowserCameraStartRequest):
-    """启动浏览器摄像头 Pipeline（等待 WebSocket 推流）"""
+    """启动浏览器摄像头 Pipeline（内存队列模式，零磁盘 I/O）
+
+    架构：
+    - 浏览器 JPEG → WebSocket → 服务端解码 numpy → 内存队列
+    - Pipeline 线程从队列消费 numpy 帧（无磁盘 I/O）
+    - Pipeline stdout 通过 fd 重定向到 pipe → ffmpeg H.264 编码
+    - H.264 fMP4 → WebSocket → 浏览器 MSE 播放
+    """
     _ensure_dirs()
 
     # 并发控制
@@ -1416,45 +1425,16 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
     pipeline_cfg = config.get("pipeline", {})
 
     task_id = str(uuid.uuid4())[:8]
-    frames_dir = _get_browser_frames_dir(task_id)
     stream_dir = _get_stream_dir(task_id)
 
-    cmd = [
-        sys.executable, "-m", "pipeline",
-        f"browser_camera_{task_id}",
-        "--frames-dir", str(frames_dir),
-        "--virtual-fps", "15",
-        "--no-output",  # 不保存输出视频
-        "--no-screenshots",  # 不保存截图，减少 I/O 开销
-        "--raw-stdout",  # raw stdout → H.264 推流
-        "--output-size", "640x480",  # 统一输出尺寸
-        "--stop-file", str(stream_dir / "__STOP__"),  # 停止信号
-        "--camera",
-        "--demo",
-    ]
-    if req.concurrent_mode:
-        cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
+    # 创建内存帧队列（WebSocket 解码后直送 numpy 帧）
+    frame_queue: queue.Queue = queue.Queue(maxsize=30)
+    _frame_queues[task_id] = frame_queue
 
-    # ── 核心检测参数 ──
-    cmd.extend(["--conf", str(req.conf_threshold)])
-    cmd.extend(["--iou", str(req.iou_threshold)])
-    cmd.extend(["--process-every", str(req.process_every)])
-    cmd.extend(["--detect-every", str(req.detect_every)])
+    # 创建 pipe：pipeline 线程写 raw BGR → H.264 读取器读
+    pipe_r, pipe_w = os.pipe()
 
-    # ── 高级参数 ──
-    if req.max_frames > 0:
-        cmd.extend(["--max-frames", str(req.max_frames)])
-    if req.device:
-        cmd.extend(["--device", req.device])
-    if req.yolo_model:
-        cmd.extend(["--yolo-model", req.yolo_model])
-    if req.prompt_mode:
-        cmd.extend(["--prompt-mode", req.prompt_mode])
-    if req.enable_refresh:
-        cmd.append("--enable-refresh")
-        cmd.extend(["--gap-num", str(req.gap_num)])
-
-    logger.info("启动浏览器摄像头 Pipeline: %s", " ".join(cmd))
+    logger.info("启动浏览器摄像头 Pipeline (内存队列模式, task=%s)", task_id)
 
     async with _state_lock:
         _task_status[task_id] = {
@@ -1471,28 +1451,144 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
     try:
         await sem.acquire()
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path.cwd()),
-            preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
-        )
-        async with _state_lock:
-            _running_processes[task_id] = process
-        # 启动 H.264 编码器（浏览器摄像头也走 H.264 推流）
-        asyncio.create_task(_start_h264_reader(task_id, process, 640, 480))
-        asyncio.create_task(_wait_pipeline(task_id, process, sem))
-    except FileNotFoundError:
+
+        # ── H.264 编码器：从 pipe 读 raw BGR → ffmpeg → fMP4 ──
+        class _PipeReader:
+            """从 pipe fd 读取 raw bytes，给 asyncio 用"""
+            def __init__(self, fd: int):
+                self._fd = fd
+                self._loop = asyncio.get_event_loop()
+            async def readexactly(self, n: int) -> bytes:
+                return await self._loop.run_in_executor(None, self._blocking_read, n)
+            def _blocking_read(self, n: int) -> bytes:
+                buf = b""
+                while len(buf) < n:
+                    chunk = os.read(self._fd, n - len(buf))
+                    if not chunk:
+                        break
+                    buf += chunk
+                return buf if len(buf) == n else b""
+
+        class _NullStderr:
+            """模拟 process.stderr，pipeline 完成前阻塞"""
+            def __init__(self):
+                self._done = threading.Event()
+            async def readline(self) -> bytes:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._done.wait, 300)
+                return b""
+            def signal_done(self):
+                self._done.set()
+
+        class _FakeProcess:
+            """模拟 asyncio.subprocess.Process 接口"""
+            def __init__(self, pipe_fd: int):
+                self.stdout = _PipeReader(pipe_fd)
+                self.stderr = _NullStderr()
+                self.returncode = None
+            def kill(self):
+                try:
+                    os.close(pipe_r)
+                except OSError:
+                    pass
+
+        fake_proc = _FakeProcess(pipe_r)
+        asyncio.create_task(_start_h264_reader(task_id, fake_proc, 640, 480))
+
+        # ── Pipeline 线程 ──
+        pipe_cfg = dict(pipeline_cfg)
+        pipe_cfg.update({
+            "concurrent_mode": req.concurrent_mode,
+            "conf_threshold": req.conf_threshold,
+            "iou_threshold": req.iou_threshold,
+            "process_every_n_frames": req.process_every,
+            "detect_every_n_frames": req.detect_every,
+            "max_concurrent": req.max_concurrent or pipeline_cfg.get("max_concurrent", 4),
+            "demo": True,
+            "no_output": True,
+            "save_screenshots": False,
+            "raw_stdout": True,
+            "output_size": [640, 480],
+            "stop_file": str(stream_dir / "__STOP__"),
+        })
+        if req.max_frames > 0:
+            pipe_cfg["max_frames"] = req.max_frames
+        if req.device:
+            pipe_cfg["device"] = req.device
+        if req.yolo_model:
+            pipe_cfg["yolo_model"] = req.yolo_model
+        if req.prompt_mode:
+            pipe_cfg["prompt_mode"] = req.prompt_mode
+        if req.enable_refresh:
+            pipe_cfg["enable_refresh"] = True
+            pipe_cfg["gap_num"] = req.gap_num
+        config["pipeline"] = pipe_cfg
+
+        def _run_pipeline():
+            """在独立线程中运行 pipeline，stdout fd 重定向到 pipe"""
+            import cv2
+            from pipeline.pipeline import ShipPipeline
+            from pipeline.virtual_camera import VirtualCamera
+
+            # fd 重定向：把 stdout (fd=1) 指向 pipe_w
+            # 这样 pipeline 的 open("/dev/stdout","wb") 写入的数据全部进入 pipe
+            saved_stdout_fd = os.dup(1)
+            os.dup2(pipe_w, 1)
+
+            try:
+                vc = VirtualCamera(frame_queue=frame_queue, fps=15.0)
+                pipeline = ShipPipeline(config=config)
+                stats = pipeline.process(source=vc, display=False, max_frames=req.max_frames)
+
+                # 输出摘要到 stderr（不经过 fd 1）
+                summary_json = json.dumps(stats, ensure_ascii=False)
+                os.write(saved_stdout_fd, f"\n__PIPELINE_SUMMARY__:{summary_json}\n".encode())
+
+            except Exception as e:
+                logger.error("Pipeline 线程异常: %s", e)
+                import traceback
+                traceback.print_exc()
+                stats = {"error": str(e)}
+            finally:
+                # 恢复 stdout fd
+                os.dup2(saved_stdout_fd, 1)
+                os.close(saved_stdout_fd)
+                os.close(pipe_w)
+
+            # 通知主循环完成
+            loop = asyncio.get_event_loop()
+
+            async def _finish():
+                async with _state_lock:
+                    if "error" in stats:
+                        _task_status[task_id]["status"] = "failed"
+                        _task_status[task_id]["error"] = stats["error"]
+                    else:
+                        _task_status[task_id]["status"] = "completed"
+                        _task_status[task_id]["progress"] = "处理完成"
+                await _stop_h264_stream(task_id)
+                fake_proc.stderr.signal_done()
+                sem.release()
+                _cleanup_stream_dir(task_id)
+
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(_finish()))
+
+        thread = threading.Thread(target=_run_pipeline, name=f"pipeline-{task_id}", daemon=True)
+        thread.start()
+
+    except Exception as e:
         sem.release()
+        os.close(pipe_r)
+        os.close(pipe_w)
+        _frame_queues.pop(task_id, None)
         async with _state_lock:
             _task_status[task_id]["status"] = "failed"
-            _task_status[task_id]["error"] = "pipeline 模块不存在"
-        raise HTTPException(status_code=500, detail="pipeline 模块不存在")
+            _task_status[task_id]["error"] = str(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
     return PipelineStartResponse(
         success=True,
-        message=f"浏览器摄像头 Pipeline 已启动，请连接 WebSocket 推流",
+        message=f"浏览器摄像头 Pipeline 已启动 (内存队列模式)，请连接 WebSocket 推流",
         task_id=task_id,
     )
 
