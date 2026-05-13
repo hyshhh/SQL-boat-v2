@@ -118,6 +118,7 @@ class PipelineStartRequest(BaseModel):
     iou_threshold: float = 0.45
     process_every: int = 15
     detect_every: int = 2
+    target_fps: float = 0
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -136,6 +137,7 @@ class BrowserCameraStartRequest(BaseModel):
     iou_threshold: float = 0.45
     process_every: int = 15
     detect_every: int = 2
+    target_fps: float = 0
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -630,6 +632,10 @@ async def start_pipeline(req: PipelineStartRequest):
     cmd.extend(["--iou", str(req.iou_threshold)])
     cmd.extend(["--process-every", str(req.process_every)])
     cmd.extend(["--detect-every", str(req.detect_every)])
+
+    # ── 帧率控制 ──
+    if req.target_fps > 0:
+        cmd.extend(["--target-fps", str(req.target_fps)])
 
     # ── 高级参数 ──
     if req.max_frames > 0:
@@ -1508,6 +1514,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "iou_threshold": req.iou_threshold,
             "process_every_n_frames": req.process_every,
             "detect_every_n_frames": req.detect_every,
+            "target_fps": req.target_fps,
             "max_concurrent": req.max_concurrent or pipeline_cfg.get("max_concurrent", 4),
             "demo": True,
             "no_output": True,

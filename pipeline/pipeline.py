@@ -62,6 +62,7 @@ class ShipPipeline:
         self._yolo_async: bool = bool(pipe_cfg.get("yolo_async", False))
         self._max_concurrent: int = pipe_cfg.get("max_concurrent") or 4
         self._max_queued_frames: int = pipe_cfg.get("max_queued_frames") or 30
+        self._target_fps: float = float(pipe_cfg.get("target_fps", 0))  # 0=不限制
         self._process_every_n: int = max(1, pipe_cfg.get("process_every_n_frames") or 1)
         self._detect_every_n: int = max(1, pipe_cfg.get("detect_every_n_frames") or 1)
         self._demo_enabled: bool = bool(pipe_cfg.get("demo", False))
@@ -694,6 +695,7 @@ class ShipPipeline:
                 if not ret:
                     break
                 frame_id += 1
+                frame_start_time = time.time()
                 if max_frames > 0 and frame_id > max_frames:
                     break
 
@@ -789,6 +791,13 @@ class ShipPipeline:
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
                         break
+
+                # 帧率控制：防止主循环跑太快淹没 ffmpeg
+                if self._target_fps > 0:
+                    frame_interval = 1.0 / self._target_fps
+                    elapsed_since_frame = time.time() - frame_start_time
+                    if elapsed_since_frame < frame_interval:
+                        time.sleep(frame_interval - elapsed_since_frame)
 
                 self._fps.tick("process")
 

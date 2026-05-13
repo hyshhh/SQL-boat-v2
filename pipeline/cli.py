@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conf", type=float, default=None, help="检测置信度阈值")
     parser.add_argument("--iou", type=float, default=None, help="NMS IoU 阈值（兼容参数）")
     parser.add_argument("--detect-every", type=int, default=None, help="每 N 帧做一次 YOLO 检测")
+    parser.add_argument("--target-fps", type=float, default=None, help="目标帧率（0=不限制，建议 15-30）")
     parser.add_argument("--camera", action="store_true", help="摄像头模式")
     parser.add_argument("--frames-dir", default=None, help="帧目录模式：从指定目录读取 latest.jpg（浏览器摄像头推流）")
     parser.add_argument("--virtual-fps", type=float, default=15.0, help="帧目录模式的虚拟帧率 (默认 15)")
@@ -82,6 +83,8 @@ def _merge_args_to_config(args, config: dict) -> dict:
         config["pipeline"]["conf_threshold"] = args.conf
     if args.detect_every is not None:
         config["pipeline"]["detect_every_n_frames"] = args.detect_every
+    if args.target_fps is not None:
+        config["pipeline"]["target_fps"] = args.target_fps
     if args.iou is not None:
         config["pipeline"]["iou_threshold"] = args.iou
     if args.no_screenshots is not None:
