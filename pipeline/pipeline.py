@@ -106,6 +106,9 @@ class ShipPipeline:
         self._trace_lock = threading.Lock()
         self._max_trace_entries = 500
 
+        # 渲染帧缓存（非处理帧复用，避免重复 PIL 渲染）
+        self._cached_display_frame: np.ndarray | None = None
+
         logger.info(
             "ShipPipeline 初始化: mode=%s, process_every=%d, refresh=%s(gap=%d)",
             "concurrent" if self._concurrent_mode else "cascade",
@@ -140,7 +143,8 @@ class ShipPipeline:
 
     @staticmethod
     def _encode_image(image: np.ndarray) -> str:
-        success, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        # quality=85 平衡清晰度与速度（弦号文字需要足够清晰度）
+        success, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not success:
             raise RuntimeError("图像编码失败")
         return base64.b64encode(buf.tobytes()).decode("utf-8")
@@ -645,10 +649,16 @@ class ShipPipeline:
                 if frame_id % 30 == 0:
                     self._tracker.cleanup_stale(frame_id)
 
-                # 渲染
+                # 渲染（非处理帧复用上次渲染结果，省掉昂贵的 PIL 文字绘制）
                 if self._demo_enabled or output_path or display or frame_writer:
-                    with self._latency.measure("demo"):
-                        display_frame = self._renderer.render(frame, last_detections, self._tracker.active_tracks, self._fps.get_all_fps(), frame_id, self._task_queue.qsize(), self._max_queued_frames)
+                    if should_process or self._cached_display_frame is None:
+                        with self._latency.measure("demo"):
+                            self._cached_display_frame = self._renderer.render(
+                                frame, last_detections, self._tracker.active_tracks,
+                                self._fps.get_all_fps(), frame_id,
+                                self._task_queue.qsize(), self._max_queued_frames,
+                            )
+                    display_frame = self._cached_display_frame
                 else:
                     display_frame = frame
 

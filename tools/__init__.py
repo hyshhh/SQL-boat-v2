@@ -50,16 +50,8 @@ def _vlm_infer(image_b64: str, prompt_mode: str = "detailed") -> dict:
         "Content-Type": "application/json",
     }
 
-    # 重新编码 base64，提高 JPEG 质量（识别弦号文字需要更高清晰度）
-    try:
-        img_bytes = base64.b64decode(image_b64)
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is not None:
-            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            image_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-    except Exception:
-        pass  # 解码失败则使用原始 base64
+    # 跳过重复编码：crop 已经在 pipeline 中以 JPEG quality=85 编码过，
+    # 直接使用原始 base64，避免 解码→重编码→重base64 的 CPU 浪费
 
     if prompt_mode == "brief":
         prompt = (
@@ -98,7 +90,7 @@ def _vlm_infer(image_b64: str, prompt_mode: str = "detailed") -> dict:
         ],
     }
 
-    resp = httpx.post(api_url, headers=headers, json=payload, timeout=15)
+    resp = httpx.post(api_url, headers=headers, json=payload, timeout=8)
     resp.raise_for_status()
 
     try:

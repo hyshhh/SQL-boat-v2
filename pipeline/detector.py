@@ -119,7 +119,7 @@ class ShipDetector:
             max_dim = max(crop_w, crop_h)
             if max_dim < target_min:
                 scale = target_min / max_dim
-                crop = cv2.resize(crop, (int(crop_w * scale), int(crop_h * scale)), interpolation=cv2.INTER_LANCZOS4)
+                crop = cv2.resize(crop, (int(crop_w * scale), int(crop_h * scale)), interpolation=cv2.INTER_LINEAR)
             elif max_dim > target_max:
                 scale = target_max / max_dim
                 crop = cv2.resize(crop, (int(crop_w * scale), int(crop_h * scale)), interpolation=cv2.INTER_AREA)

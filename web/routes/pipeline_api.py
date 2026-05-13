@@ -613,6 +613,7 @@ async def start_pipeline(req: PipelineStartRequest):
         sys.executable, "-m", "pipeline",
         video_source,
         "--no-output",  # 不保存输出视频，仅实时推流
+        "--no-screenshots",  # 摄像头模式不保存截图，减少 I/O 开销
     ]
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
@@ -922,7 +923,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         "-g", "30",        # GOP = 30 帧（每 2 秒一个关键帧）
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-frag_duration", "1000000",  # 1 秒一个 fragment（降低延迟）
+        "-frag_duration", "500000",  # 0.5 秒一个 fragment（降低延迟）
         "-flush_packets", "1",
         "-f", "mp4",
         "pipe:1",
@@ -1417,6 +1418,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         "--frames-dir", str(frames_dir),
         "--virtual-fps", "15",
         "--no-output",  # 不保存输出视频
+        "--no-screenshots",  # 不保存截图，减少 I/O 开销
         "--raw-stdout",  # raw stdout → H.264 推流
         "--output-size", "640x480",  # 统一输出尺寸
         "--stop-file", str(stream_dir / "__STOP__"),  # 停止信号

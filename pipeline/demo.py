@@ -15,7 +15,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── 中文字体支持（PIL 渲染）──
+# ── 中文字体支持（PIL 渲染，带缓存优化）──
 _cjk_font = None
 _pil_available = False
 
@@ -42,15 +42,42 @@ try:
 except ImportError:
     pass
 
+# 文字尺寸缓存（避免每帧重复计算 textbbox）
+_text_size_cache: dict[str, tuple[int, int]] = {}
+_TEXT_CACHE_MAX = 200
+
+
+def _get_text_size(text: str, font) -> tuple[int, int]:
+    """获取文字尺寸（带缓存）。"""
+    cached = _text_size_cache.get(text)
+    if cached is not None:
+        return cached
+    # 创建临时 PIL Image 测量尺寸（只需一次）
+    tmp = Image.new("RGB", (1, 1))
+    draw = ImageDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    if len(_text_size_cache) < _TEXT_CACHE_MAX:
+        _text_size_cache[text] = size
+    return size
+
 
 def _pil_put_text(img: np.ndarray, text: str, x: int, y: int, fill: tuple[int, int, int] = (255, 255, 255)) -> tuple[int, int]:
-    """用 PIL 在 numpy 图像上绘制中文文字。"""
-    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil_img)
-    bbox = draw.textbbox((x, y), text, font=_cjk_font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((x, y), text, font=_cjk_font, fill=fill)
-    img[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    """用 PIL 在 numpy 图像上绘制中文文字（优化版：直接操作像素数组）。"""
+    # 只转换需要绘制的 ROI 区域，而非整张图
+    tw, th = _get_text_size(text, _cjk_font)
+    h, w = img.shape[:2]
+    # 计算 ROI（带边距）
+    rx1, ry1 = max(0, x), max(0, y)
+    rx2, ry2 = min(w, x + tw + 2), min(h, y + th + 2)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return tw, th
+    # 只转换 ROI 区域
+    roi = img[ry1:ry2, rx1:rx2]
+    pil_roi = Image.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_roi)
+    draw.text((x - rx1, y - ry1), text, font=_cjk_font, fill=fill)
+    img[ry1:ry2, rx1:rx2] = cv2.cvtColor(np.array(pil_roi), cv2.COLOR_RGB2BGR)
     return tw, th
 
 
@@ -129,10 +156,8 @@ class DemoRenderer:
     def _render_label(self, canvas: np.ndarray, text: str, x: int, y: int, color: tuple[int, int, int]) -> None:
         if _pil_available and _cjk_font:
             try:
-                pil_img = Image.fromarray(np.zeros((1, 1, 3), dtype=np.uint8))
-                draw = ImageDraw.Draw(pil_img)
-                bbox = draw.textbbox((0, 0), text, font=_cjk_font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                # 使用缓存的尺寸查询，避免创建临时 PIL Image
+                tw, th = _get_text_size(text, _cjk_font)
                 cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + th + 10), color, -1)
                 _pil_put_text(canvas, text, x + 3, y + 4, fill=(255, 255, 255))
                 return
