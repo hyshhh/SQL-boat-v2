@@ -1093,13 +1093,11 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
                 async with _state_lock:
                     task = _task_status.get(task_id)
                 if not task or task["status"] != "running":
-                    # 任务已结束，通知前端
                     try:
                         await ws.send_json({"type": "done"})
                     except Exception:
                         pass
                     break
-                # 任务仍在运行，发心跳防止浏览器/代理超时断开
                 try:
                     await ws.send_json({"type": "heartbeat"})
                 except Exception:
@@ -1114,8 +1112,9 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
                 break
     except asyncio.CancelledError:
         pass
+    except Exception:
+        pass  # 抑制 keepalive ping failed 等 websockets 库内部异常
     finally:
-        # 清理
         async with _state_lock:
             stream = _h264_streams.get(task_id)
             if stream:
@@ -1228,7 +1227,9 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        if "AssertionError" not in str(type(e).__name__):
+        # 抑制 keepalive ping failed 等 websockets 库内部异常
+        err_name = type(e).__name__
+        if "AssertionError" not in err_name and "keepalive" not in str(e).lower():
             logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
     finally:
         # 清理：取消发送任务，移除队列

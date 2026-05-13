@@ -300,6 +300,19 @@ function connectStreamWs(taskId) {
 
     let frameCount = 0;
     let fpsTimer = performance.now();
+    let decodedFrames = 0;  // 实际解码的视频帧数
+
+    // 用 requestVideoFrameCallback 统计真实视频帧数
+    function setupFrameCounter() {
+      const vEl = document.getElementById('streamVideo');
+      if (vEl && 'requestVideoFrameCallback' in vEl) {
+        const onFrame = () => {
+          decodedFrames++;
+          vEl.requestVideoFrameCallback(onFrame);
+        };
+        vEl.requestVideoFrameCallback(onFrame);
+      }
+    }
 
     ws.onmessage = (evt) => {
       if (evt.data instanceof ArrayBuffer) {
@@ -343,6 +356,7 @@ function connectStreamWs(taskId) {
             });
 
             sb.appendBuffer(payload);
+            setupFrameCounter();  // 视频开始播放后启动帧计数
           } catch (e) {
             console.error('MSE SourceBuffer 创建失败:', e);
           }
@@ -378,9 +392,9 @@ function connectStreamWs(taskId) {
           frameCount++;
           const now = performance.now();
           if (now - fpsTimer > 1000) {
-            const fps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
+            const segFps = (frameCount * 1000 / (now - fpsTimer)).toFixed(1);
             const fpsEl = document.getElementById('streamFps');
-            if (fpsEl) fpsEl.textContent = `${fps} seg/s`;
+            if (fpsEl) fpsEl.textContent = `${segFps} seg/s | ${decodedFrames} 帧`;
             frameCount = 0;
             fpsTimer = now;
           }
