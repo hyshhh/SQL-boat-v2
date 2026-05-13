@@ -1740,6 +1740,139 @@ async def _receive_mjpeg_camera_frames(
         asyncio.create_task(_delayed_cleanup(task_id, delay=10))
 
 
+# ── WebRTC 摄像头 ──
+
+async def _receive_webrtc_camera_frames(
+    pc: Any,
+    task_id: str,
+    frame_queue: queue.Queue | None,
+    use_queue: bool,
+    frames_dir: Path | None,
+):
+    """WebRTC 模式：从 RTCPeerConnection 的视频 track 读取帧 → pipeline 队列"""
+    import cv2
+    import numpy as np
+    from aiortc import MediaStreamTrack
+
+    frame_count = 0
+
+    async with _state_lock:
+        _task_status[task_id]["progress"] = "WebRTC 已连接，等待视频帧..."
+
+    # 获取远程视频 track
+    video_track = None
+    for t in pc.getReceivers():
+        if t.track and t.track.kind == "video":
+            video_track = t.track
+            break
+
+    if video_track is None:
+        logger.error("WebRTC 无视频 track: %s", task_id)
+        return
+
+    logger.info("WebRTC 视频 track 已就绪: %s", task_id)
+
+    try:
+        while True:
+            try:
+                frame = await video_track.recv()
+            except Exception:
+                break
+
+            # aiortc VideoFrame → numpy BGR
+            img = frame.to_ndarray(format="bgr24")
+
+            # 缩放到 640x480
+            if img.shape[1] != 640 or img.shape[0] != 480:
+                img = cv2.resize(img, (640, 480))
+
+            if use_queue:
+                try:
+                    frame_queue.put_nowait(img)
+                except queue.Full:
+                    try:
+                        frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        frame_queue.put_nowait(img)
+                    except queue.Full:
+                        pass
+            else:
+                _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if frames_dir:
+                    frame_path = frames_dir / "latest.jpg"
+                    tmp_path = frames_dir / "latest.jpg.tmp"
+                    tmp_path.write_bytes(buf.tobytes())
+                    tmp_path.rename(frame_path)
+
+            frame_count += 1
+            if frame_count % 30 == 0:
+                logger.debug("WebRTC 解码帧计数: %d", frame_count)
+
+    except Exception as e:
+        logger.error("WebRTC 帧接收异常 [%s]: %s", task_id, e)
+    finally:
+        logger.info("WebRTC 帧接收结束: %s (共 %d 帧)", task_id, frame_count)
+        if use_queue and frame_queue:
+            try:
+                frame_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if task_id in _task_status and _task_status[task_id]["status"] == "running":
+            _task_status[task_id]["progress"] = f"WebRTC 已断开（共 {frame_count} 帧），等待 pipeline 结束..."
+        asyncio.create_task(_delayed_cleanup(task_id, delay=10))
+
+
+class WebRTCOfferRequest(BaseModel):
+    sdp: str
+    type: str = "offer"
+
+
+@router.post("/webrtc/offer/{task_id}")
+async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
+    """WebRTC 信令端点：接收 SDP offer，返回 SDP answer"""
+    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc.contrib.media import MediaRelay
+
+    async with _state_lock:
+        if task_id not in _task_status:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if _task_status[task_id]["status"] != "running":
+            raise HTTPException(status_code=400, detail="任务未运行")
+
+    frame_queue = _frame_queues.get(task_id)
+    use_queue = frame_queue is not None
+    frames_dir = _get_browser_frames_dir(task_id) if not use_queue else None
+
+    # 创建 PeerConnection
+    pc = RTCPeerConnection()
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        logger.info("WebRTC 连接状态: %s → %s, task=%s", pc.connectionState, pc.connectionState, task_id)
+        if pc.connectionState in ("failed", "closed", "disconnected"):
+            await pc.close()
+
+    # 设置远程描述（浏览器的 offer）
+    offer = RTCSessionDescription(sdp=req.sdp, type=req.type)
+    await pc.setRemoteDescription(offer)
+
+    # 创建 answer
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    # 启动帧接收（后台任务）
+    asyncio.create_task(_receive_webrtc_camera_frames(
+        pc, task_id, frame_queue, use_queue, frames_dir
+    ))
+
+    return {
+        "sdp": pc.localDescription.sdp,
+        "type": pc.localDescription.type,
+    }
+
+
 async def _receive_h264_camera_frames(
     websocket: WebSocket, task_id: str,
     frame_queue: queue.Queue | None, use_queue: bool,

@@ -716,8 +716,8 @@ async function startBrowserCamera() {
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
 
     if (streamMode === 'h264') {
-      // ── H264 模式：MediaRecorder 编码 → WebSocket → 后端 ffmpeg 解码 ──
-      setupH264CameraWs(wsUrl, stream);
+      // ── WebRTC 模式：浏览器直连服务器，超低延迟 ──
+      setupWebRTCCamera(cameraTaskId, stream);
     } else {
       // ── MJPEG 模式：逐帧 JPEG → WebSocket ──
       setupMjpegCameraWs(wsUrl, stream);
@@ -774,113 +774,79 @@ function setupMjpegCameraWs(wsUrl, stream) {
   setupWsHandlers(ws);
 }
 
-/** H264 模式：MediaRecorder 编码推流 */
-function setupH264CameraWs(wsUrl, stream) {
-  let mediaRecorder = null;
+/** WebRTC 模式：浏览器直连服务器，超低延迟推流 */
+function setupWebRTCCamera(taskId, stream) {
+  let pc = null;
 
-  // 选择编码格式（仅 H264）
-  const codecOptions = [
-    'video/mp4; codecs=h264',
-    'video/webm; codecs=h264',
-  ];
-  let selectedCodec = '';
-  for (const opt of codecOptions) {
-    if (MediaRecorder.isTypeSupported(opt)) {
-      selectedCodec = opt;
-      break;
-    }
-  }
-  if (!selectedCodec) {
-    selectedCodec = 'video/webm';
-    console.warn('未找到优选编码，使用默认 WebM');
-  }
+  async function connect() {
+    try {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
 
-  // 提取编码名称（用于后端 ffmpeg）
-  let codecName = 'vp8';
-  const codecMatch = selectedCodec.match(/codecs=(\w+)/);
-  if (codecMatch) codecName = codecMatch[1];
+      // 添加摄像头轨道
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-  function setupWsHandlers(ws) {
-    ws.onopen = () => {
-      // 发送编码配置信息（第一条消息必须是文本）
-      ws.send(JSON.stringify({ type: 'h264', codec: codecName }));
-      showToast(`摄像头已连接 (H264: ${codecName})，开始推流`);
-      updateCameraStatus('running', `H264 推流中 (${codecName})...`);
+      // ICE 候选收集完毕后再发送 offer（减少信令往返）
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // 等 ICE 完成
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') {
+          resolve();
+        } else {
+          pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete') resolve();
+          });
+        }
+      });
+
+      // 发送 offer 给服务器
+      const resp = await fetch(`${PIPE_API}/webrtc/offer/${taskId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sdp: pc.localDescription.sdp,
+          type: pc.localDescription.type,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.detail || 'WebRTC 信令失败');
+      }
+
+      const answer = await resp.json();
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+      showToast('摄像头已连接 (WebRTC)，开始推流');
+      updateCameraStatus('running', 'WebRTC 推流中...');
       document.getElementById('btnStartCamera').style.display = 'none';
       document.getElementById('btnStopCamera').style.display = '';
 
-      connectCameraH264(cameraTaskId);
+      connectCameraH264(taskId);
       startCameraPolling();
 
-      // 启动 MediaRecorder
-      try {
-        mediaRecorder = new MediaRecorder(stream, {
-          mimeType: selectedCodec,
-          videoBitsPerSecond: 2_000_000, // 2 Mbps
-        });
-      } catch (e) {
-        console.error('MediaRecorder 创建失败:', e);
-        showToast('H264 编码器创建失败，回退到 MJPEG', 'error');
-        ws.close();
-        setupMjpegCameraWs(wsUrl, stream);
-        return;
-      }
+      browserCameraTimer = true; // 标记正在推流
 
-      mediaRecorder.ondataavailable = async (event) => {
-        if (event.data && event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-          try {
-            const buffer = await event.data.arrayBuffer();
-            ws.send(buffer);
-          } catch (e) {
-            console.warn('H264 数据发送失败:', e);
-          }
+      pc.addEventListener('connectionstatechange', () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          showToast('WebRTC 连接断开', 'error');
         }
-      };
+      });
 
-      mediaRecorder.onerror = (event) => {
-        console.error('MediaRecorder 错误:', event.error);
-        showToast('H264 编码出错: ' + (event.error?.message || '未知'), 'error');
-      };
-
-      mediaRecorder.onstop = () => {
-        console.log('MediaRecorder 已停止');
-      };
-
-      // 每 200ms 产出一个数据块（平衡延迟和效率）
-      mediaRecorder.start(200);
-      browserCameraTimer = true; // 标记正在录制（用于 stopFrameCapture 判断）
-    };
-
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (!msg.ok) console.warn('H264 推流反馈:', msg.error);
-      } catch {}
-    };
-
-    ws.onerror = () => { console.warn('H264 WebSocket 错误'); };
-
-    ws.onclose = (evt) => {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-        mediaRecorder = null;
-      }
-      if (!cameraTaskId) return;
-      if (evt.code !== 1000 && cameraTaskId) {
-        showToast('摄像头连接断开，尝试重连…', 'info');
-        setTimeout(() => {
-          if (!cameraTaskId) return;
-          const newWs = new WebSocket(wsUrl);
-          browserCameraWs = newWs;
-          setupWsHandlers(newWs);
-        }, 2000);
-      }
-    };
+    } catch (e) {
+      console.error('WebRTC 连接失败:', e);
+      showToast('WebRTC 连接失败: ' + e.message, 'error');
+      if (pc) { pc.close(); pc = null; }
+    }
   }
 
-  const ws = new WebSocket(wsUrl);
-  browserCameraWs = ws;
-  setupWsHandlers(ws);
+  connect();
+
+  // 暴露给 stopCameraPipeline 使用
+  browserCameraWs = { close: () => { if (pc) { pc.close(); pc = null; } } };
 }
 
 function startFrameCapture(ws, stream) {

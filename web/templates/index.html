@@ -321,11 +321,11 @@
               <div class="input-group">
                 <select id="camStreamMode">
                   <option value="mjpeg">MJPEG（逐帧 JPEG，低延迟）</option>
-                  <option value="h264">H.264（连续编码，省带宽）</option>
+                  <option value="h264">WebRTC（超低延迟，直连推流）</option>
                 </select>
               </div>
               <div class="param-hint" style="font-size:11px;color:#888;margin-top:4px">
-                H.264 通过浏览器 MediaRecorder 编码，带宽降低 50%+，延迟稍高
+                WebRTC 浏览器直连服务器，延迟最低，无需 ffmpeg 中间转码
               </div>
             </div>
           </div>
