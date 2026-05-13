@@ -1593,6 +1593,13 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                     else:
                         _task_status[task_id]["status"] = "completed"
                         _task_status[task_id]["progress"] = "处理完成"
+                # 关闭 WebRTC PC，让帧接收器退出
+                pc = _webrtc_pcs.pop(task_id, None)
+                if pc:
+                    try:
+                        await asyncio.wait_for(pc.close(), timeout=3.0)
+                    except Exception:
+                        pass
                 await _stop_h264_stream(task_id)
                 fake_proc.stderr.signal_done()
                 sem.release()
@@ -1852,7 +1859,7 @@ async def _receive_webrtc_camera_frames(
         logger.info("WebRTC 帧接收结束: %s (共 %d 帧)", task_id, frame_count)
         _webrtc_pcs.pop(task_id, None)
         try:
-            await pc.close()
+            await asyncio.wait_for(pc.close(), timeout=3.0)
         except Exception:
             pass
         if use_queue and frame_queue:
@@ -1860,9 +1867,11 @@ async def _receive_webrtc_camera_frames(
                 frame_queue.put_nowait(None)
             except queue.Full:
                 pass
-        if task_id in _task_status and _task_status[task_id]["status"] == "running":
+        # 仅在 pipeline 仍在运行时才触发延迟清理（pipeline 已结束则无需干预）
+        task_still_running = task_id in _task_status and _task_status[task_id]["status"] == "running"
+        if task_still_running:
             _task_status[task_id]["progress"] = f"WebRTC 已断开（共 {frame_count} 帧），等待 pipeline 结束..."
-        asyncio.create_task(_delayed_cleanup(task_id, delay=10))
+            asyncio.create_task(_delayed_cleanup(task_id, delay=10))
 
 
 class WebRTCOfferRequest(BaseModel):
@@ -1900,10 +1909,11 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         logger.info("WebRTC 连接状态: %s, task=%s", pc.connectionState, task_id)
-        if pc.connectionState in ("failed", "closed", "disconnected"):
+        # 只在确定失败时关闭，disconnected 是临时状态可能恢复
+        if pc.connectionState in ("failed", "closed"):
             _webrtc_pcs.pop(task_id, None)
             try:
-                await pc.close()
+                await asyncio.wait_for(pc.close(), timeout=3.0)
             except Exception:
                 pass
 

@@ -837,8 +837,8 @@ function setupWebRTCCamera(taskId, stream) {
       browserCameraTimer = true; // 标记正在推流
 
       pc.addEventListener('connectionstatechange', () => {
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-          showToast('WebRTC 连接断开', 'error');
+        if (pc.connectionState === 'failed') {
+          showToast('WebRTC 连接失败', 'error');
         }
       });
 
