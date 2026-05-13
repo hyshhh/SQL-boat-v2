@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
@@ -110,7 +109,7 @@ def _merge_args_to_config(args, config: dict) -> dict:
 
 
 def _print_config(args, config: dict) -> None:
-    """打印启动配置面板。"""
+    """打印启动配置（纯文本，兼容 subprocess stderr 捕获）。"""
     pipe_cfg = config.get("pipeline", {})
     concurrent_mode = pipe_cfg.get("concurrent_mode", False)
     yolo_async = pipe_cfg.get("yolo_async", False)
@@ -120,24 +119,27 @@ def _print_config(args, config: dict) -> None:
     prompt_mode = pipe_cfg.get("prompt_mode", "detailed")
     demo_enabled = pipe_cfg.get("demo", False)
     yolo_model = pipe_cfg.get("yolo_model", "yolov8n.pt")
+    detect_every = pipe_cfg.get("detect_every_n_frames", 2)
+    process_every = pipe_cfg.get("process_every_n_frames", 15)
 
     source_label = args.source
     if args.frames_dir:
         source_label = f"帧目录: {args.frames_dir} (虚拟FPS={args.virtual_fps})"
 
-    console.print(Panel(
-        f"[bold]🚢 船弦号识别视频流水线[/bold]\n\n"
-        f"输入源: [cyan]{source_label}[/cyan]\n"
-        f"模式: [{'green' if concurrent_mode else 'yellow'}]{'并发' if concurrent_mode else '级联'}[/]\n"
-        f"YOLO 异步: [{'green' if yolo_async else 'dim'}]{'开启' if yolo_async else '关闭'}[/]\n"
-        f"推理: [blue]三步链路 (VLM→Lookup→Retrieve)[/]\n"
-        f"并发数: {max_concurrent}\n"
-        f"定时刷新: {'[green]开启[/green] (每%d帧)' % gap_num if enable_refresh else '[dim]关闭[/dim]'}\n"
-        f"提示词: {prompt_mode}\n"
-        f"Demo: {'[green]开启[/green]' if demo_enabled else '[dim]关闭[/dim]'}\n"
-        f"YOLO: {yolo_model}",
-        title="启动配置",
-    ))
+    lines = [
+        "┌─ Pipeline 启动配置 ─────────────────────┐",
+        f"│  输入源:    {source_label}",
+        f"│  模式:      {'并发' if concurrent_mode else '级联'}",
+        f"│  YOLO 异步: {'开启' if yolo_async else '关闭'}",
+        f"│  检测间隔:  每 {detect_every} 帧 | 推理间隔: 每 {process_every} 帧",
+        f"│  并发数:    {max_concurrent}",
+        f"│  刷新:      {'开启 (每%d帧)' % gap_num if enable_refresh else '关闭'}",
+        f"│  提示词:    {prompt_mode} | Demo: {'开' if demo_enabled else '关'}",
+        f"│  YOLO 模型: {yolo_model}",
+        "└─────────────────────────────────────────┘",
+    ]
+    for line in lines:
+        console.print(line)
 
 
 def main() -> None:

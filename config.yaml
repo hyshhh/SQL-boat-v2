@@ -57,7 +57,7 @@ demo_video:
 # Pipeline 视频处理流水线配置
 pipeline:
   concurrent_mode: true
-  yolo_async: false            # true: YOLO 检测也走独立线程，主循环只读帧+渲染（解决卡顿）
+  yolo_async: true             # true: YOLO 检测也走独立线程，主循环只读帧+渲染（解决卡顿）
   max_concurrent: 4
   max_queued_frames: 30
   process_every_n_frames: 15
