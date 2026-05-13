@@ -58,7 +58,7 @@ demo_video:
 pipeline:
   concurrent_mode: true
   yolo_async: true             # true: YOLO 检测也走独立线程，主循环只读帧+渲染（解决卡顿）
-  target_fps: 15               # 主循环帧率上限（0=不限制，建议 15-30，防止异步模式下跑太快淹没 ffmpeg）
+  target_fps: 0                # 主循环帧率上限（0=自动匹配源视频 FPS，建议 15-30）
   max_concurrent: 4
   max_queued_frames: 30
   process_every_n_frames: 15

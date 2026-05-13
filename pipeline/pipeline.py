@@ -108,6 +108,11 @@ class ShipPipeline:
         self._yolo_result_queue: queue.Queue = queue.Queue(maxsize=2)
         self._yolo_thread: threading.Thread | None = None
 
+        # 背压控制：跟踪管道积压
+        self._frames_submitted: int = 0   # 主循环已提交到 raw_writer 的帧数
+        self._frames_encoded_ref: list[int] | None = pipe_cfg.get("_frames_encoded_ref")  # 共享引用 [frames_fed]
+        self._max_pipe_lag: int = pipe_cfg.get("max_pipe_lag", 45)  # 最大允许积压帧数
+
         # Agent 运行链路日志
         self._agent_trace: list[dict[str, Any]] = []
         self._trace_lock = threading.Lock()
@@ -458,25 +463,34 @@ class ShipPipeline:
     # ── Raw stdout 帧写入器 ────────────────────
 
     class _RawStdoutWriter:
-        """后台线程：将原始 BGR 帧写入 stdout（供 ffmpeg H.264 编码）。"""
+        """后台线程：将原始 BGR 帧写入 stdout（供 ffmpeg H.264 编码）。自带背压。"""
 
-        def __init__(self):
+        def __init__(self, max_pending: int = 2):
             self._queue: list = []
             self._lock = threading.Lock()
             self._stop = threading.Event()
             self._frame_count = 0
             self._drop_count = 0
+            self._max_pending = max_pending  # 最大待写帧数，超过时阻塞主循环
+            self._can_write = threading.Event()
+            self._can_write.set()
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
         def write(self, frame: np.ndarray) -> None:
-            with self._lock:
-                if self._queue:
-                    self._drop_count += 1
-                self._queue = [frame]
+            """提交帧到写入队列。队列满时阻塞（背压），不丢帧。"""
+            # 等待队列有空间
+            while not self._stop.is_set():
+                with self._lock:
+                    if len(self._queue) < self._max_pending:
+                        self._queue.append(frame)
+                        return
+                # 队列满，等待写入线程消费
+                self._can_write.wait(timeout=0.5)
 
         def stop(self) -> None:
             self._stop.set()
+            self._can_write.set()  # 唤醒等待
             self._thread.join(timeout=2)
             if self._drop_count:
                 logger.info("Raw stdout 写入: 共 %d 帧, 丢弃 %d 帧", self._frame_count, self._drop_count)
@@ -497,7 +511,10 @@ class ShipPipeline:
                         self._frame_count += 1
                     except (BrokenPipeError, OSError):
                         break
+                    # 通知主循环队列有空间了
+                    self._can_write.set()
                 else:
+                    self._can_write.clear()
                     self._stop.wait(0.005)
 
     # ── H265/H264 转码 ────────────────────────
@@ -644,6 +661,13 @@ class ShipPipeline:
         total_detections = 0
         start_time = time.time()
 
+        # 自动设置 target_fps：未指定时使用源视频 FPS（防止异步模式下跑太快）
+        if self._target_fps <= 0:
+            src_fps = input_src.source_fps
+            if src_fps > 0:
+                self._target_fps = src_fps
+                logger.info("自动设置 target_fps = 源视频 FPS (%.1f)", src_fps)
+
         # 帧输出：MJPEG 磁盘写入 + 可选 raw stdout
         frame_writer: ShipPipeline._FrameWriter | None = None
         raw_writer: ShipPipeline._RawStdoutWriter | None = None
@@ -780,6 +804,7 @@ class ShipPipeline:
                         if fw != ow or fh != oh:
                             out_frame = cv2.resize(display_frame, (ow, oh), interpolation=cv2.INTER_LINEAR)
                     raw_writer.write(out_frame)
+                    self._frames_submitted += 1
                 elif frame_writer:
                     frame_writer.write(display_frame)
 
@@ -792,12 +817,24 @@ class ShipPipeline:
                     if key == ord("q"):
                         break
 
-                # 帧率控制：防止主循环跑太快淹没 ffmpeg
+                # 帧率控制 + 背压：防止主循环跑太快淹没 ffmpeg
                 if self._target_fps > 0:
                     frame_interval = 1.0 / self._target_fps
                     elapsed_since_frame = time.time() - frame_start_time
-                    if elapsed_since_frame < frame_interval:
-                        time.sleep(frame_interval - elapsed_since_frame)
+                    sleep_time = frame_interval - elapsed_since_frame
+
+                    # 背压：管道积压太多时额外减速
+                    if self._frames_encoded_ref is not None:
+                        frames_encoded = self._frames_encoded_ref[0]
+                        pipe_lag = self._frames_submitted - frames_encoded
+                        if pipe_lag > self._max_pipe_lag:
+                            extra_wait = min(2.0, (pipe_lag - self._max_pipe_lag) * 0.05)
+                            sleep_time += extra_wait
+                            if frame_id % 30 == 0:
+                                logger.warning("管道积压 %d 帧 (max=%d)，额外等待 %.1fs", pipe_lag, self._max_pipe_lag, extra_wait)
+
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
                 self._fps.tick("process")
 

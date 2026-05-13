@@ -693,7 +693,8 @@ async def start_pipeline(req: PipelineStartRequest):
             _running_processes[task_id] = process
 
         # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
-        asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h))
+        h264_fps = int(req.target_fps) if req.target_fps > 0 else 15
+        asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h, fps=h264_fps))
 
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
@@ -922,7 +923,7 @@ def _get_browser_frames_dir(task_id: str) -> Path:
 
 # ── H.264 推流管理 ──
 
-async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, w: int = 640, h: int = 480):
+async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, w: int = 640, h: int = 480, fps: int = 15):
     """后台任务：从 pipeline stdout 读取 raw BGR 帧，启动 ffmpeg 编码为 H.264 fMP4"""
 
     # ffmpeg 命令：stdin raw BGR → H.264 fMP4
@@ -933,7 +934,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         "-fflags", "+nobuffer",   # 减少输入缓冲
         "-flags", "+low_delay",   # 低延迟模式
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-video_size", f"{w}x{h}",
-        "-r", "15",  # 时间基准帧率
+        "-r", str(fps),  # 时间基准帧率（匹配目标 FPS）
         "-i", "pipe:0",
         "-c:v", "libx264",
         "-preset", "ultrafast", "-tune", "zerolatency",
@@ -959,6 +960,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
             "latest_segments": [],
             "max_segments": 30,
             "reader_task": None,
+            "frames_fed": 0,      # 已喂给 ffmpeg 的帧数（供背压检测）
         }
 
     ffmpeg_proc = None
@@ -1007,6 +1009,11 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
                     if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
                         ffmpeg_proc.stdin.write(data)
                         await ffmpeg_proc.stdin.drain()
+                        # 更新已喂帧计数（供背压检测）
+                        async with _state_lock:
+                            stream = _h264_streams.get(task_id)
+                            if stream:
+                                stream["frames_fed"] += 1
                     else:
                         break
             except (asyncio.IncompleteReadError, BrokenPipeError, OSError):
@@ -1503,7 +1510,8 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                     pass
 
         fake_proc = _FakeProcess(pipe_r)
-        asyncio.create_task(_start_h264_reader(task_id, fake_proc, 640, 480))
+        cam_fps = int(req.target_fps) if req.target_fps > 0 else 15
+        asyncio.create_task(_start_h264_reader(task_id, fake_proc, 640, 480, fps=cam_fps))
 
         # ── Pipeline 线程 ──
         pipe_cfg = dict(pipeline_cfg)
