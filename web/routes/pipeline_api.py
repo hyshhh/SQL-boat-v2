@@ -130,6 +130,7 @@ class PipelineStartRequest(BaseModel):
 
 class BrowserCameraStartRequest(BaseModel):
     concurrent_mode: bool = True
+    stream_mode: str = "mjpeg"  # "mjpeg" 或 "h264"
     # ── 核心检测参数 ──
     conf_threshold: float = 0.25
     iou_threshold: float = 0.45
@@ -1462,6 +1463,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "error": None,
             "is_camera": True,
             "is_browser_camera": True,
+            "stream_mode": req.stream_mode,
         }
 
     try:
@@ -1612,7 +1614,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
 @router.websocket("/ws/camera/{task_id}")
 async def browser_camera_ws(websocket: WebSocket, task_id: str):
-    """WebSocket 端点 — 接收浏览器摄像头 JPEG 帧，解码后直送内存队列（零磁盘 I/O）"""
+    """WebSocket 端点 — 接收浏览器摄像头视频流（支持 MJPEG 和 H264 两种模式）"""
     async with _state_lock:
         if task_id not in _task_status:
             await websocket.close(code=4004, reason="任务不存在")
@@ -1629,74 +1631,283 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
     frames_dir = _get_browser_frames_dir(task_id) if not use_queue else None
 
     async with _state_lock:
-        _task_status[task_id]["progress"] = "摄像头已连接，推流中..."
+        _task_status[task_id]["progress"] = "摄像头已连接，等待推流..."
 
-    frame_count = 0
+    # ── 根据第一条消息自动判断模式 ──
+    try:
+        first_msg = await asyncio.wait_for(websocket.receive(), timeout=10.0)
+    except asyncio.TimeoutError:
+        logger.warning("摄像头 WebSocket 10秒内无数据: %s", task_id)
+        await websocket.close(code=4008, reason="超时")
+        return
+
+    # 判断模式：文本消息 = H264 模式（含 codec 配置），二进制 = MJPEG 模式
+    if "text" in first_msg:
+        # ── H264 模式 ──
+        try:
+            cfg = json.loads(first_msg["text"])
+            codec = cfg.get("codec", "vp8")
+        except (json.JSONDecodeError, KeyError):
+            codec = "vp8"
+        logger.info("摄像头 H264 模式: codec=%s, task=%s", codec, task_id)
+        await _receive_h264_camera_frames(
+            websocket, task_id, frame_queue, use_queue, frames_dir, codec
+        )
+    elif "bytes" in first_msg:
+        # ── MJPEG 模式 ──
+        logger.info("摄像头 MJPEG 模式: task=%s", task_id)
+        await _receive_mjpeg_camera_frames(
+            websocket, task_id, frame_queue, use_queue, frames_dir, first_msg["bytes"]
+        )
+    else:
+        await websocket.close(code=4001, reason="未知消息格式")
+
+
+async def _receive_mjpeg_camera_frames(
+    websocket: WebSocket, task_id: str,
+    frame_queue: queue.Queue | None, use_queue: bool,
+    frames_dir: Path | None, first_frame: bytes,
+):
+    """MJPEG 模式：逐帧接收 JPEG，解码后送队列"""
     import cv2
     import numpy as np
 
-    try:
-        while _task_status.get(task_id, {}).get("status") == "running":
-            data = await websocket.receive_bytes()
+    frame_count = 0
 
-            # 验证 JPEG 魔数
-            if len(data) < 3 or data[:2] != b'\xff\xd8':
-                await websocket.send_json({"ok": False, "error": "非 JPEG 数据"})
-                continue
+    # 处理已经收到的第一帧
+    async def _process_jpeg(data: bytes):
+        nonlocal frame_count
+        if len(data) < 3 or data[:2] != b'\xff\xd8':
+            await websocket.send_json({"ok": False, "error": "非 JPEG 数据"})
+            return
 
-            if use_queue:
-                # 内存直传：解码 JPEG → numpy → queue（零磁盘 I/O）
-                def _decode_and_enqueue():
-                    nparr = np.frombuffer(data, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if frame is not None:
+        if use_queue:
+            def _decode_and_enqueue():
+                nparr = np.frombuffer(data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    try:
+                        frame_queue.put_nowait(frame)
+                    except queue.Full:
+                        try:
+                            frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
                         try:
                             frame_queue.put_nowait(frame)
                         except queue.Full:
-                            # 队列满，丢掉最旧帧
-                            try:
-                                frame_queue.get_nowait()
-                            except queue.Empty:
-                                pass
-                            try:
-                                frame_queue.put_nowait(frame)
-                            except queue.Full:
-                                pass
-                await asyncio.to_thread(_decode_and_enqueue)
-            else:
-                # fallback：写磁盘
-                frame_path = frames_dir / "latest.jpg"
-                tmp_path = frames_dir / "latest.jpg.tmp"
+                            pass
+            await asyncio.to_thread(_decode_and_enqueue)
+        else:
+            frame_path = frames_dir / "latest.jpg"
+            tmp_path = frames_dir / "latest.jpg.tmp"
+            def _write_frame():
+                tmp_path.write_bytes(data)
+                tmp_path.rename(frame_path)
+            await asyncio.to_thread(_write_frame)
 
-                def _write_frame():
-                    tmp_path.write_bytes(data)
-                    tmp_path.rename(frame_path)
+        frame_count += 1
+        if frame_count % 30 == 0:
+            logger.debug("MJPEG 帧计数: %d", frame_count)
+            try:
+                await websocket.send_json({"ok": True, "frame": frame_count})
+            except Exception:
+                pass
 
-                await asyncio.to_thread(_write_frame)
+    try:
+        # 处理第一帧
+        await _process_jpeg(first_frame)
 
-            frame_count += 1
-            if frame_count % 30 == 0:
-                logger.debug("浏览器摄像头帧计数: %d", frame_count)
+        while _task_status.get(task_id, {}).get("status") == "running":
+            data = await websocket.receive_bytes()
+            await _process_jpeg(data)
+
+    except WebSocketDisconnect:
+        logger.info("MJPEG WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
+    except Exception as e:
+        if "AssertionError" not in str(type(e).__name__):
+            logger.error("MJPEG WebSocket 异常: %s", e)
+    finally:
+        if use_queue and frame_queue:
+            try:
+                frame_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        logger.info("MJPEG 推流结束: %s (共 %d 帧)", task_id, frame_count)
+        if task_id in _task_status and _task_status[task_id]["status"] == "running":
+            _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧），等待 pipeline 结束..."
+        asyncio.create_task(_delayed_cleanup(task_id, delay=10))
+
+
+async def _receive_h264_camera_frames(
+    websocket: WebSocket, task_id: str,
+    frame_queue: queue.Queue | None, use_queue: bool,
+    frames_dir: Path | None, codec: str,
+):
+    """H264 模式：接收 MediaRecorder 编码的视频流，ffmpeg 解码后送队列"""
+    import cv2
+    import numpy as np
+
+    # 根据 codec 选择 ffmpeg 输入格式
+    codec_lower = codec.lower()
+    if "h264" in codec_lower or "avc" in codec_lower:
+        ffmpeg_input_fmt = "mp4"
+        ffmpeg_input_args = ["-f", "mp4"]
+    elif "vp9" in codec_lower:
+        ffmpeg_input_fmt = "webm"
+        ffmpeg_input_args = ["-f", "webm"]
+    elif "vp8" in codec_lower:
+        ffmpeg_input_fmt = "webm"
+        ffmpeg_input_args = ["-f", "webm"]
+    else:
+        # 通用：让 ffmpeg 自动探测格式
+        ffmpeg_input_fmt = "auto"
+        ffmpeg_input_args = []
+
+    ffmpeg_bin = _find_binary("ffmpeg") or "ffmpeg"
+    ffmpeg_cmd = [
+        ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+        "-fflags", "+nobuffer+discardcorrupt",
+        "-flags", "+low_delay",
+        *ffmpeg_input_args,
+        "-i", "pipe:0",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-video_size", "640x480",
+        "pipe:1",
+    ]
+
+    async with _state_lock:
+        _task_status[task_id]["progress"] = f"H264 推流中 (codec={codec})..."
+
+    ffmpeg_proc = None
+    frame_count = 0
+    frame_size = 640 * 480 * 3
+
+    async def _feed_stdin():
+        """从 WebSocket 接收 H264 数据块，喂给 ffmpeg stdin"""
+        nonlocal frame_count
+        try:
+            while _task_status.get(task_id, {}).get("status") == "running":
+                msg = await websocket.receive()
+                if "bytes" in msg:
+                    chunk = msg["bytes"]
+                    if chunk and ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                        ffmpeg_proc.stdin.write(chunk)
+                        await ffmpeg_proc.stdin.drain()
+                elif "text" in msg:
+                    # 客户端可能发控制消息，忽略
+                    pass
+        except WebSocketDisconnect:
+            logger.info("H264 WebSocket 断开: %s", task_id)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
                 try:
-                    await websocket.send_json({"ok": True, "frame": frame_count})
+                    ffmpeg_proc.stdin.close()
                 except Exception:
                     pass
 
-    except WebSocketDisconnect:
-        logger.info("浏览器摄像头 WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
+    async def _drain_stderr():
+        """消费 ffmpeg stderr 防止阻塞"""
+        try:
+            while True:
+                line = await ffmpeg_proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    logger.debug("[ffmpeg h264-cam %s] %s", task_id, text)
+        except (asyncio.IncompleteReadError, OSError):
+            pass
+
+    async def _read_frames():
+        """从 ffmpeg stdout 读取解码后的 BGR 帧，送入 pipeline 队列"""
+        nonlocal frame_count
+        loop = asyncio.get_event_loop()
+        try:
+            while _task_status.get(task_id, {}).get("status") == "running":
+                data = await loop.run_in_executor(None, _blocking_read_frame, frame_size)
+                if not data:
+                    break
+
+                frame = np.frombuffer(data, np.uint8).reshape(480, 640, 3).copy()
+
+                if use_queue:
+                    try:
+                        frame_queue.put_nowait(frame)
+                    except queue.Full:
+                        try:
+                            frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            frame_queue.put_nowait(frame)
+                        except queue.Full:
+                            pass
+                else:
+                    # fallback：写磁盘（JPEG）
+                    _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    frame_path = frames_dir / "latest.jpg"
+                    tmp_path = frames_dir / "latest.jpg.tmp"
+                    tmp_path.write_bytes(buf.tobytes())
+                    tmp_path.rename(frame_path)
+
+                frame_count += 1
+                if frame_count % 30 == 0:
+                    logger.debug("H264 解码帧计数: %d", frame_count)
+                    try:
+                        await websocket.send_json({"ok": True, "frame": frame_count})
+                    except Exception:
+                        pass
+        except (asyncio.IncompleteReadError, OSError):
+            pass
+
+    def _blocking_read_frame(n: int) -> bytes:
+        """阻塞读取 n 字节（在 executor 中运行）"""
+        buf = b""
+        while len(buf) < n:
+            chunk = ffmpeg_proc.stdout.read(n - len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        return buf if len(buf) == n else b""
+
+    try:
+        # 启动 ffmpeg 解码进程
+        ffmpeg_proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        logger.info("H264 解码器已启动: codec=%s, task=%s", codec, task_id)
+
+        # 并行运行：喂数据 + 读帧 + 消费 stderr
+        await asyncio.gather(_feed_stdin(), _read_frames(), _drain_stderr())
+
     except Exception as e:
-        if "AssertionError" not in str(type(e).__name__):
-            logger.error("浏览器摄像头 WebSocket 异常: %s", e)
+        logger.error("H264 摄像头推流异常 [%s]: %s", task_id, e)
     finally:
-        # 通知 pipeline 推流结束（发送哨兵值）
+        if ffmpeg_proc:
+            try:
+                if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                    ffmpeg_proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                ffmpeg_proc.kill()
+            except ProcessLookupError:
+                pass
         if use_queue and frame_queue:
             try:
-                frame_queue.put_nowait(None)  # 哨兵值
+                frame_queue.put_nowait(None)
             except queue.Full:
                 pass
-        logger.info("浏览器摄像头推流结束: %s (共 %d 帧)", task_id, frame_count)
+        logger.info("H264 推流结束: %s (共解码 %d 帧)", task_id, frame_count)
         if task_id in _task_status and _task_status[task_id]["status"] == "running":
-            _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧），等待 pipeline 结束..."
+            _task_status[task_id]["progress"] = f"摄像头已断开（共解码 {frame_count} 帧），等待 pipeline 结束..."
         asyncio.create_task(_delayed_cleanup(task_id, delay=10))
 
 

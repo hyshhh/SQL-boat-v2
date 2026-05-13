@@ -225,6 +225,7 @@ function collectCameraParams() {
     enable_refresh: document.getElementById('camEnableRefresh').checked,
     gap_num: parseInt(document.getElementById('camGapNum').value, 10) || 150,
     max_concurrent: parseInt(document.getElementById('camMaxConcurrent').value, 10) || 4,
+    stream_mode: (document.getElementById('camStreamMode') || {}).value || 'mjpeg',
   };
 }
 
@@ -635,6 +636,7 @@ function onCameraSourceChange() {
   const val = sel.value;
   const urlInput = document.getElementById('cameraUrl');
   const previewRow = document.getElementById('browserCameraPreviewRow');
+  const streamModeRow = document.getElementById('camStreamModeRow');
 
   if (urlInput) {
     urlInput.style.display = (val === '0' || val === 'browser') ? 'none' : '';
@@ -647,6 +649,11 @@ function onCameraSourceChange() {
 
   if (previewRow) {
     previewRow.style.display = val === 'browser' ? '' : 'none';
+  }
+
+  // H264/MJPEG 切换仅对浏览器摄像头可见
+  if (streamModeRow) {
+    streamModeRow.style.display = val === 'browser' ? '' : 'none';
   }
 }
 
@@ -664,6 +671,8 @@ async function startBrowserCamera() {
   const btn = document.getElementById('btnStartCamera');
   btn.disabled = true;
   btn.innerHTML = '<span class="loading-spinner"></span> 启动中...';
+
+  const streamMode = (document.getElementById('camStreamMode') || {}).value || 'mjpeg';
 
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -688,12 +697,14 @@ async function startBrowserCamera() {
     }
     if (placeholder) placeholder.style.display = 'none';
 
+    const params = collectCameraParams();
     const resp = await fetch(`${PIPE_API}/start-browser-camera`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
-        ...collectCameraParams(),
+        stream_mode: streamMode,
+        ...params,
       }),
     });
     const data = await resp.json();
@@ -704,46 +715,13 @@ async function startBrowserCamera() {
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
 
-    function setupWsHandlers(ws) {
-      ws.onopen = () => {
-        showToast('摄像头已连接，开始推流');
-        updateCameraStatus('running', '浏览器摄像头推流中...');
-        document.getElementById('btnStartCamera').style.display = 'none';
-        document.getElementById('btnStopCamera').style.display = '';
-
-        // H.264 WebSocket + MSE 播放（和视频 Demo 一样）
-        connectCameraH264(cameraTaskId);
-
-        startFrameCapture(ws, stream);
-        startCameraPolling();
-      };
-
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data);
-          if (!msg.ok) console.warn('帧发送失败:', msg.error);
-        } catch {}
-      };
-
-      ws.onerror = () => { console.warn('WebSocket 错误'); };
-
-      ws.onclose = (evt) => {
-        if (!cameraTaskId) return;
-        if (evt.code !== 1000 && cameraTaskId) {
-          showToast('摄像头连接断开，尝试重连…', 'info');
-          setTimeout(() => {
-            if (!cameraTaskId) return;
-            const newWs = new WebSocket(wsUrl);
-            browserCameraWs = newWs;
-            setupWsHandlers(newWs);
-          }, 2000);
-        }
-      };
+    if (streamMode === 'h264') {
+      // ── H264 模式：MediaRecorder 编码 → WebSocket → 后端 ffmpeg 解码 ──
+      setupH264CameraWs(wsUrl, stream);
+    } else {
+      // ── MJPEG 模式：逐帧 JPEG → WebSocket ──
+      setupMjpegCameraWs(wsUrl, stream);
     }
-
-    const ws = new WebSocket(wsUrl);
-    browserCameraWs = ws;
-    setupWsHandlers(ws);
 
   } catch (e) {
     showToast('启动失败: ' + e.message, 'error');
@@ -752,6 +730,160 @@ async function startBrowserCamera() {
     btn.disabled = false;
     btn.innerHTML = '▶ 启动摄像头识别';
   }
+}
+
+/** MJPEG 模式：逐帧 JPEG 推流 */
+function setupMjpegCameraWs(wsUrl, stream) {
+  function setupWsHandlers(ws) {
+    ws.onopen = () => {
+      showToast('摄像头已连接 (MJPEG)，开始推流');
+      updateCameraStatus('running', 'MJPEG 推流中...');
+      document.getElementById('btnStartCamera').style.display = 'none';
+      document.getElementById('btnStopCamera').style.display = '';
+
+      connectCameraH264(cameraTaskId);
+      startFrameCapture(ws, stream);
+      startCameraPolling();
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (!msg.ok) console.warn('帧发送失败:', msg.error);
+      } catch {}
+    };
+
+    ws.onerror = () => { console.warn('MJPEG WebSocket 错误'); };
+
+    ws.onclose = (evt) => {
+      if (!cameraTaskId) return;
+      if (evt.code !== 1000 && cameraTaskId) {
+        showToast('摄像头连接断开，尝试重连…', 'info');
+        setTimeout(() => {
+          if (!cameraTaskId) return;
+          const newWs = new WebSocket(wsUrl);
+          browserCameraWs = newWs;
+          setupWsHandlers(newWs);
+        }, 2000);
+      }
+    };
+  }
+
+  const ws = new WebSocket(wsUrl);
+  browserCameraWs = ws;
+  setupWsHandlers(ws);
+}
+
+/** H264 模式：MediaRecorder 编码推流 */
+function setupH264CameraWs(wsUrl, stream) {
+  let mediaRecorder = null;
+
+  // 选择最佳 H264 编码格式
+  const codecOptions = [
+    'video/webm; codecs=vp9',
+    'video/webm; codecs=vp8',
+    'video/webm; codecs=h264',
+    'video/mp4; codecs=h264',
+    'video/webm',
+  ];
+  let selectedCodec = '';
+  for (const opt of codecOptions) {
+    if (MediaRecorder.isTypeSupported(opt)) {
+      selectedCodec = opt;
+      break;
+    }
+  }
+  if (!selectedCodec) {
+    selectedCodec = 'video/webm';
+    console.warn('未找到优选编码，使用默认 WebM');
+  }
+
+  // 提取编码名称（用于后端 ffmpeg）
+  let codecName = 'vp8';
+  const codecMatch = selectedCodec.match(/codecs=(\w+)/);
+  if (codecMatch) codecName = codecMatch[1];
+
+  function setupWsHandlers(ws) {
+    ws.onopen = () => {
+      // 发送编码配置信息（第一条消息必须是文本）
+      ws.send(JSON.stringify({ type: 'h264', codec: codecName }));
+      showToast(`摄像头已连接 (H264: ${codecName})，开始推流`);
+      updateCameraStatus('running', `H264 推流中 (${codecName})...`);
+      document.getElementById('btnStartCamera').style.display = 'none';
+      document.getElementById('btnStopCamera').style.display = '';
+
+      connectCameraH264(cameraTaskId);
+      startCameraPolling();
+
+      // 启动 MediaRecorder
+      try {
+        mediaRecorder = new MediaRecorder(stream, {
+          mimeType: selectedCodec,
+          videoBitsPerSecond: 2_000_000, // 2 Mbps
+        });
+      } catch (e) {
+        console.error('MediaRecorder 创建失败:', e);
+        showToast('H264 编码器创建失败，回退到 MJPEG', 'error');
+        ws.close();
+        setupMjpegCameraWs(wsUrl, stream);
+        return;
+      }
+
+      mediaRecorder.ondataavailable = async (event) => {
+        if (event.data && event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+          try {
+            const buffer = await event.data.arrayBuffer();
+            ws.send(buffer);
+          } catch (e) {
+            console.warn('H264 数据发送失败:', e);
+          }
+        }
+      };
+
+      mediaRecorder.onerror = (event) => {
+        console.error('MediaRecorder 错误:', event.error);
+        showToast('H264 编码出错: ' + (event.error?.message || '未知'), 'error');
+      };
+
+      mediaRecorder.onstop = () => {
+        console.log('MediaRecorder 已停止');
+      };
+
+      // 每 200ms 产出一个数据块（平衡延迟和效率）
+      mediaRecorder.start(200);
+      browserCameraTimer = true; // 标记正在录制（用于 stopFrameCapture 判断）
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (!msg.ok) console.warn('H264 推流反馈:', msg.error);
+      } catch {}
+    };
+
+    ws.onerror = () => { console.warn('H264 WebSocket 错误'); };
+
+    ws.onclose = (evt) => {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        mediaRecorder = null;
+      }
+      if (!cameraTaskId) return;
+      if (evt.code !== 1000 && cameraTaskId) {
+        showToast('摄像头连接断开，尝试重连…', 'info');
+        setTimeout(() => {
+          if (!cameraTaskId) return;
+          const newWs = new WebSocket(wsUrl);
+          browserCameraWs = newWs;
+          setupWsHandlers(newWs);
+        }, 2000);
+      }
+    };
+  }
+
+  const ws = new WebSocket(wsUrl);
+  browserCameraWs = ws;
+  setupWsHandlers(ws);
 }
 
 function startFrameCapture(ws, stream) {
@@ -803,7 +935,11 @@ function startFrameCapture(ws, stream) {
 
 function stopFrameCapture() {
   if (browserCameraTimer) {
-    cancelAnimationFrame(browserCameraTimer);
+    if (typeof browserCameraTimer === 'number') {
+      cancelAnimationFrame(browserCameraTimer);
+    }
+    // MediaRecorder 模式：browserCameraTimer = true，需要手动停止录制
+    // MediaRecorder 停止在 ws.onclose 中处理
     browserCameraTimer = null;
   }
   if (browserCameraWs) {

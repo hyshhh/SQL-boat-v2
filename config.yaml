@@ -54,6 +54,10 @@ demo_video:
     - ".webm"
   max_file_size_mb: 500     # 最大上传文件大小 (MB)
 
+# 摄像头 Demo 配置
+camera_demo:
+  stream_mode: "mjpeg"       # 前端→后端编码: "mjpeg"（逐帧JPEG）或 "h264"（MediaRecorder连续编码）
+
 # Pipeline 视频处理流水线配置
 pipeline:
   concurrent_mode: true
