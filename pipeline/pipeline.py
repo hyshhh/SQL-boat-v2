@@ -663,7 +663,7 @@ class ShipPipeline:
                 for det in detections:
                     self._tracker.get_or_create(det.track_id, frame_id)
 
-                # 推理
+                # 推理：按间隔提交到 VLM worker 池（不阻塞主循环）
                 should_process = (frame_id % self._process_every_n == 0)
                 if should_process:
                     if self._concurrent_mode:
@@ -671,22 +671,21 @@ class ShipPipeline:
                     else:
                         self._cascade_process(detections, frame_id)
 
+                # 每帧都 drain VLM 结果（非阻塞，有就取）
                 if self._concurrent_mode:
                     self._drain_results()
 
                 if frame_id % 30 == 0:
                     self._tracker.cleanup_stale(frame_id)
 
-                # 渲染（非处理帧复用上次渲染结果，省掉昂贵的 PIL 文字绘制）
+                # 渲染：每帧都执行（用 tracker 最新状态，检测框 + 识别标签实时更新）
                 if self._demo_enabled or output_path or display or frame_writer:
-                    if should_process or self._cached_display_frame is None:
-                        with self._latency.measure("demo"):
-                            self._cached_display_frame = self._renderer.render(
-                                frame, last_detections, self._tracker.active_tracks,
-                                self._fps.get_all_fps(), frame_id,
-                                self._task_queue.qsize(), self._max_queued_frames,
-                            )
-                    display_frame = self._cached_display_frame
+                    with self._latency.measure("demo"):
+                        display_frame = self._renderer.render(
+                            frame, last_detections, self._tracker.active_tracks,
+                            self._fps.get_all_fps(), frame_id,
+                            self._task_queue.qsize(), self._max_queued_frames,
+                        )
                 else:
                     display_frame = frame
 
