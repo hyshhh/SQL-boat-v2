@@ -1574,9 +1574,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 os.close(saved_stdout_fd)
                 os.close(pipe_w)
 
-            # 通知主循环完成
-            loop = asyncio.get_event_loop()
-
+            # 通知主循环完成（线程中无 event loop，需用主循环引用）
             async def _finish():
                 async with _state_lock:
                     if "error" in stats:
@@ -1590,7 +1588,10 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 sem.release()
                 _cleanup_stream_dir(task_id)
 
-            loop.call_soon_threadsafe(lambda: asyncio.create_task(_finish()))
+            asyncio.run_coroutine_threadsafe(_finish(), _main_loop)
+
+        # 捕获主循环引用，供线程内使用
+        _main_loop = asyncio.get_event_loop()
 
         thread = threading.Thread(target=_run_pipeline, name=f"pipeline-{task_id}", daemon=True)
         thread.start()
