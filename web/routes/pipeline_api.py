@@ -921,6 +921,21 @@ async def _delayed_cleanup(task_id: str, delay: int = 10):
 _frame_queues: dict[str, queue.Queue] = {}  # task_id → Queue(numpy BGR frames)
 
 
+def _queue_put_latest(q: queue.Queue, item) -> None:
+    """向队列放入最新帧：满时丢掉最旧的，保证消费者总是拿到最新帧。"""
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        try:
+            q.get_nowait()  # 丢弃最旧帧
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(item)
+        except queue.Full:
+            pass  # 极端情况：仍然满，丢弃此帧
+
+
 def _get_browser_frames_dir(task_id: str) -> Path:
     """获取浏览器摄像头帧目录（仅作为 fallback）"""
     d = Path("./_browser_frames") / task_id
@@ -947,10 +962,11 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         "-preset", "ultrafast", "-tune", "zerolatency",
         "-profile:v", "baseline", "-level", "3.1",
         "-bf", "0",        # 无 B 帧（降低延迟）
-        "-g", "30",        # GOP = 30 帧（每 2 秒一个关键帧）
+        "-g", "15",        # GOP = 15 帧（每秒一个关键帧，降低延迟）
+        "-threads", "2",   # 限制编码线程，减少延迟
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-frag_duration", "500000",  # 0.5 秒一个 fragment（降低延迟）
+        "-frag_duration", "250000",  # 0.25 秒一个 fragment（更低延迟）
         "-flush_packets", "1",
         "-f", "mp4",
         "pipe:1",
@@ -1704,17 +1720,7 @@ async def _receive_mjpeg_camera_frames(
                 nparr = np.frombuffer(data, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if frame is not None:
-                    try:
-                        frame_queue.put_nowait(frame)
-                    except queue.Full:
-                        try:
-                            frame_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                        try:
-                            frame_queue.put_nowait(frame)
-                        except queue.Full:
-                            pass
+                    _queue_put_latest(frame_queue, frame)
             await asyncio.to_thread(_decode_and_enqueue)
         else:
             frame_path = frames_dir / "latest.jpg"
@@ -1830,17 +1836,7 @@ async def _receive_webrtc_camera_frames(
                 img = cv2.resize(img, (640, 480))
 
             if use_queue:
-                try:
-                    frame_queue.put_nowait(img)
-                except queue.Full:
-                    try:
-                        frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        frame_queue.put_nowait(img)
-                    except queue.Full:
-                        pass
+                _queue_put_latest(frame_queue, img)
             else:
                 _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if frames_dir:
@@ -2037,17 +2033,7 @@ async def _receive_h264_camera_frames(
                         frame = np.frombuffer(data, np.uint8).reshape(480, 640, 3).copy()
 
                         if use_queue:
-                            try:
-                                frame_queue.put_nowait(frame)
-                            except queue.Full:
-                                try:
-                                    frame_queue.get_nowait()
-                                except queue.Empty:
-                                    pass
-                                try:
-                                    frame_queue.put_nowait(frame)
-                                except queue.Full:
-                                    pass
+                            _queue_put_latest(frame_queue, frame)
                         else:
                             _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                             if frames_dir:

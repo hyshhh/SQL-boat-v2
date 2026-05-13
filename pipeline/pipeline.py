@@ -490,7 +490,7 @@ class ShipPipeline:
         """判断编码是否被主流浏览器原生支持。"""
         if codec is None:
             return False
-        compatible = {"h264", "vp8", "vp9", "av1", "h264", "mpeg4part10"}
+        compatible = {"h264", "vp8", "vp9", "av1", "mpeg4part10"}
         return codec in compatible
 
     @classmethod

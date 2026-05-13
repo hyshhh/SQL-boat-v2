@@ -55,7 +55,7 @@ class VirtualCamera:
         # ── 内存队列模式（零磁盘 I/O）──
         if self._queue is not None:
             try:
-                frame = self._queue.get(timeout=0.5)
+                frame = self._queue.get(timeout=0.05)
                 if frame is None:  # 哨兵值，表示推流结束
                     self._opened = False
                     return False, None

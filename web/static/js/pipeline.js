@@ -415,9 +415,9 @@ function connectStreamWs(taskId) {
 
     ws.onclose = () => {
       if (currentTaskId === taskId) {
-        setTimeout(() => {
+        _scheduleReconnect('h264-stream', () => {
           if (currentTaskId === taskId) connectStreamWs(taskId);
-        }, 1000);
+        });
       }
     };
 
@@ -427,6 +427,7 @@ function connectStreamWs(taskId) {
 
 /** 断开 H.264 推流 */
 function disconnectStreamWs() {
+  _clearReconnect('h264-stream');
   if (_h264Ws) {
     _h264Ws.onclose = null;
     _h264Ws.close();
@@ -757,14 +758,14 @@ function setupMjpegCameraWs(wsUrl, stream) {
 
     ws.onclose = (evt) => {
       if (!cameraTaskId) return;
-      if (evt.code !== 1000 && cameraTaskId) {
+      if (evt.code !== 1000) {
         showToast('摄像头连接断开，尝试重连…', 'info');
-        setTimeout(() => {
+        _scheduleReconnect('mjpeg-cam', () => {
           if (!cameraTaskId) return;
           const newWs = new WebSocket(wsUrl);
           browserCameraWs = newWs;
           setupWsHandlers(newWs);
-        }, 2000);
+        });
       }
     };
   }
@@ -859,10 +860,9 @@ function startFrameCapture(ws, stream) {
   const video = document.getElementById('browserCameraPreview');
   if (!video) return;
 
-  // 输出尺寸与 pipeline 一致，避免无谓的高分辨率编码/传输
   const OUT_W = 640;
   const OUT_H = 480;
-  const TARGET_INTERVAL = 66; // ~15fps
+  const CAPTURE_INTERVAL = 66; // ~15fps
   const JPEG_QUALITY = 0.7;
 
   const doCapture = () => {
@@ -874,25 +874,24 @@ function startFrameCapture(ws, stream) {
     canvas.height = OUT_H;
     const ctx = canvas.getContext('2d');
 
-    let lastTime = 0;
-
-    const tick = (now) => {
-      browserCameraTimer = requestAnimationFrame(tick);
-      if (now - lastTime < TARGET_INTERVAL) return;
+    const capture = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      lastTime = now;
-
       ctx.drawImage(video, 0, 0, OUT_W, OUT_H);
 
-      // toDataURL 同步完成，无回调延迟，不会跳帧
-      const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-      const binary = atob(dataUrl.split(',')[1]);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      ws.send(bytes.buffer);
+      // toBlob 异步但比 toDataURL 轻量，避免主线程 base64 编解码开销
+      canvas.toBlob((blob) => {
+        if (!blob || ws.readyState !== WebSocket.OPEN) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(reader.result);
+          }
+        };
+        reader.readAsArrayBuffer(blob);
+      }, 'image/jpeg', JPEG_QUALITY);
     };
 
-    browserCameraTimer = requestAnimationFrame(tick);
+    browserCameraTimer = setInterval(capture, CAPTURE_INTERVAL);
   };
 
   if (video.readyState >= 2) {
@@ -903,12 +902,11 @@ function startFrameCapture(ws, stream) {
 }
 
 function stopFrameCapture() {
+  _clearReconnect('mjpeg-cam');
   if (browserCameraTimer) {
     if (typeof browserCameraTimer === 'number') {
-      cancelAnimationFrame(browserCameraTimer);
+      clearInterval(browserCameraTimer);
     }
-    // MediaRecorder 模式：browserCameraTimer = true，需要手动停止录制
-    // MediaRecorder 停止在 ws.onclose 中处理
     browserCameraTimer = null;
   }
   if (browserCameraWs) {
@@ -1195,7 +1193,9 @@ function connectCameraH264(taskId) {
 
     ws.onclose = () => {
       if (cameraTaskId === taskId) {
-        setTimeout(() => { if (cameraTaskId === taskId) connectCameraH264(taskId); }, 1000);
+        _scheduleReconnect('h264-cam', () => {
+          if (cameraTaskId === taskId) connectCameraH264(taskId);
+        });
       }
     };
     ws.onerror = () => {};
@@ -1203,6 +1203,7 @@ function connectCameraH264(taskId) {
 }
 
 function disconnectCameraH264() {
+  _clearReconnect('h264-cam');
   if (_camH264Ws) { _camH264Ws.onclose = null; _camH264Ws.close(); _camH264Ws = null; }
   if (_camH264MediaSource && _camH264MediaSource.readyState === 'open') {
     try { _camH264MediaSource.endOfStream(); } catch {}
@@ -1214,6 +1215,31 @@ function disconnectCameraH264() {
   if (videoEl) { videoEl.pause(); videoEl.src = ''; }
   const fpsEl = document.getElementById('cameraStreamFps');
   if (fpsEl) fpsEl.textContent = '';
+}
+
+// ── WebSocket 自动重连（指数退避）──
+const _reconnectStates = new Map(); // key → {delay, timer}
+
+function _scheduleReconnect(key, connectFn) {
+  let state = _reconnectStates.get(key);
+  if (!state) {
+    state = { delay: 1000, timer: null };
+    _reconnectStates.set(key, state);
+  }
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = setTimeout(() => {
+    _reconnectStates.delete(key);
+    connectFn();
+  }, state.delay);
+  state.delay = Math.min(state.delay * 2, 16000); // 1s → 2s → 4s → ... → 16s max
+}
+
+function _clearReconnect(key) {
+  const state = _reconnectStates.get(key);
+  if (state) {
+    clearTimeout(state.timer);
+    _reconnectStates.delete(key);
+  }
 }
 
 // ── 工具函数 ──
