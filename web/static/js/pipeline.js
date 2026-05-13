@@ -455,6 +455,10 @@ async function stopVideoPipeline() {
   if (!currentTaskId) return;
   const taskId = currentTaskId;
 
+  // 立即停止轮询，防止后续 pollTaskStatus 干扰新任务
+  stopStatusPolling();
+  currentTaskId = null;
+
   // 断开 WebSocket 推流
   disconnectStreamWs();
 
@@ -480,8 +484,6 @@ async function stopVideoPipeline() {
     resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
   }
 
-  stopStatusPolling();
-  currentTaskId = null;
   loadTaskHistory();
 }
 
@@ -498,45 +500,53 @@ function stopStatusPolling() {
 }
 
 async function pollTaskStatus() {
-  if (!currentTaskId) return;
+  // 快照当前任务 ID，防止请求返回时 currentTaskId 已变为新任务
+  const taskId = currentTaskId;
+  if (!taskId) return;
   try {
-    const resp = await fetch(`${PIPE_API}/status/${currentTaskId}`);
+    const resp = await fetch(`${PIPE_API}/status/${taskId}`);
     if (resp.status === 404) {
-      stopStatusPolling();
-      resetPipelineButtons();
-      currentTaskId = null;
+      if (currentTaskId === taskId) {
+        stopStatusPolling();
+        resetPipelineButtons();
+        currentTaskId = null;
+      }
       return;
     }
     const data = await resp.json();
     updatePipelineStatus(data.status, data.progress || data.error || '');
 
     if (data.status === 'completed') {
-      stopStatusPolling();
-      resetPipelineButtons();
-      disconnectStreamWs();
-      showToast('✅ 处理完成!');
-      const resultPlaceholder = document.getElementById('resultPlaceholder');
-      if (resultPlaceholder) {
-        resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
+      if (currentTaskId === taskId) {
+        stopStatusPolling();
+        resetPipelineButtons();
+        disconnectStreamWs();
+        showToast('✅ 处理完成!');
+        const resultPlaceholder = document.getElementById('resultPlaceholder');
+        if (resultPlaceholder) {
+          resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
+        }
+        loadTaskHistory();
+        currentTaskId = null;
       }
-      loadTaskHistory();
-      currentTaskId = null;
     } else if (data.status === 'failed') {
-      stopStatusPolling();
-      resetPipelineButtons();
-      disconnectStreamWs();
-      const resultPlaceholder = document.getElementById('resultPlaceholder');
-      if (resultPlaceholder) {
-        resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
+      if (currentTaskId === taskId) {
+        stopStatusPolling();
+        resetPipelineButtons();
+        disconnectStreamWs();
+        const resultPlaceholder = document.getElementById('resultPlaceholder');
+        if (resultPlaceholder) {
+          resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
+        }
+        const errorMsg = data.error || '未知错误';
+        if (errorMsg === '用户手动停止') {
+          showToast('已停止', 'info');
+        } else {
+          showToast('处理失败: ' + errorMsg, 'error');
+        }
+        loadTaskHistory();
+        currentTaskId = null;
       }
-      const errorMsg = data.error || '未知错误';
-      if (errorMsg === '用户手动停止') {
-        showToast('已停止', 'info');
-      } else {
-        showToast('处理失败: ' + errorMsg, 'error');
-      }
-      loadTaskHistory();
-      currentTaskId = null;
     }
   } catch (e) {
     console.error('状态轮询失败:', e);
@@ -869,14 +879,17 @@ async function startCameraPipeline() {
 }
 
 async function stopCameraPipeline() {
-  stopFrameCapture();
-
   const taskId = cameraTaskId;
+
+  // 立即停止轮询，防止后续 pollCameraStatus 干扰新任务
+  stopCameraPolling();
+  cameraTaskId = null;
+
+  stopFrameCapture();
 
   // 断开 H.264 推流
   disconnectCameraH264();
 
-  stopCameraPolling();
   updateCameraStatus('idle', '正在停止...');
   resetCameraButtons();
 
@@ -895,7 +908,6 @@ async function stopCameraPipeline() {
   }
   if (cameraPlaceholder) cameraPlaceholder.style.display = '';
 
-  cameraTaskId = null;
   showToast('摄像头已停止');
 }
 
@@ -912,33 +924,39 @@ function stopCameraPolling() {
 }
 
 async function pollCameraStatus() {
-  if (!cameraTaskId) return;
+  // 快照当前任务 ID，防止请求返回时 cameraTaskId 已变为新任务
+  const taskId = cameraTaskId;
+  if (!taskId) return;
   try {
-    const resp = await fetch(`${PIPE_API}/status/${cameraTaskId}`);
+    const resp = await fetch(`${PIPE_API}/status/${taskId}`);
     if (resp.status === 404) {
-      stopCameraPolling();
-      resetCameraButtons();
-      cameraTaskId = null;
+      if (cameraTaskId === taskId) {
+        stopCameraPolling();
+        resetCameraButtons();
+        cameraTaskId = null;
+      }
       return;
     }
     const data = await resp.json();
     updateCameraStatus(data.status, data.progress || data.error || '');
 
     if (data.status !== 'running') {
-      stopCameraPolling();
-      resetCameraButtons();
-      disconnectCameraH264();
-      if (data.status === 'completed') {
-        showToast('✅ 摄像头处理完成');
-      } else if (data.status === 'failed') {
-        const errorMsg = data.error || '未知错误';
-        if (errorMsg === '用户手动停止') {
-          showToast('摄像头已停止', 'info');
-        } else {
-          showToast('摄像头处理失败: ' + errorMsg, 'error');
+      if (cameraTaskId === taskId) {
+        stopCameraPolling();
+        resetCameraButtons();
+        disconnectCameraH264();
+        if (data.status === 'completed') {
+          showToast('✅ 摄像头处理完成');
+        } else if (data.status === 'failed') {
+          const errorMsg = data.error || '未知错误';
+          if (errorMsg === '用户手动停止') {
+            showToast('摄像头已停止', 'info');
+          } else {
+            showToast('摄像头处理失败: ' + errorMsg, 'error');
+          }
         }
+        cameraTaskId = null;
       }
-      cameraTaskId = null;
     }
   } catch (e) {
     console.error('摄像头状态轮询失败:', e);
