@@ -809,6 +809,15 @@ async def stop_pipeline(task_id: str):
         _stop_signals.add(task_id)
         process = _running_processes[task_id]
 
+    # 关闭 WebRTC PeerConnection（如果有）
+    pc = _webrtc_pcs.pop(task_id, None)
+    if pc:
+        try:
+            await pc.close()
+            logger.info("WebRTC PeerConnection 已关闭: %s", task_id)
+        except Exception:
+            pass
+
     # 写入停止信号文件（pipeline 可以检测到）
     stream_dir = _get_stream_dir(task_id)
     stop_file = stream_dir / "__STOP__"
@@ -1742,6 +1751,10 @@ async def _receive_mjpeg_camera_frames(
 
 # ── WebRTC 摄像头 ──
 
+# 每个 task 对应一个 PeerConnection，停止时需要关闭
+_webrtc_pcs: dict[str, Any] = {}
+
+
 async def _receive_webrtc_camera_frames(
     pc: Any,
     task_id: str,
@@ -1752,7 +1765,6 @@ async def _receive_webrtc_camera_frames(
     """WebRTC 模式：从 RTCPeerConnection 的视频 track 读取帧 → pipeline 队列"""
     import cv2
     import numpy as np
-    from aiortc import MediaStreamTrack
 
     frame_count = 0
 
@@ -1768,6 +1780,8 @@ async def _receive_webrtc_camera_frames(
 
     if video_track is None:
         logger.error("WebRTC 无视频 track: %s", task_id)
+        _webrtc_pcs.pop(task_id, None)
+        await pc.close()
         return
 
     logger.info("WebRTC 视频 track 已就绪: %s", task_id)
@@ -1776,7 +1790,9 @@ async def _receive_webrtc_camera_frames(
         while True:
             try:
                 frame = await video_track.recv()
-            except Exception:
+            except Exception as e:
+                # aiortc track 结束时抛 MediaStreamError，统一处理
+                logger.debug("WebRTC track recv 结束: %s", e)
                 break
 
             # aiortc VideoFrame → numpy BGR
@@ -1814,6 +1830,11 @@ async def _receive_webrtc_camera_frames(
         logger.error("WebRTC 帧接收异常 [%s]: %s", task_id, e)
     finally:
         logger.info("WebRTC 帧接收结束: %s (共 %d 帧)", task_id, frame_count)
+        _webrtc_pcs.pop(task_id, None)
+        try:
+            await pc.close()
+        except Exception:
+            pass
         if use_queue and frame_queue:
             try:
                 frame_queue.put_nowait(None)
@@ -1833,7 +1854,6 @@ class WebRTCOfferRequest(BaseModel):
 async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     """WebRTC 信令端点：接收 SDP offer，返回 SDP answer"""
     from aiortc import RTCPeerConnection, RTCSessionDescription
-    from aiortc.contrib.media import MediaRelay
 
     async with _state_lock:
         if task_id not in _task_status:
@@ -1841,18 +1861,31 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
         if _task_status[task_id]["status"] != "running":
             raise HTTPException(status_code=400, detail="任务未运行")
 
+    # 关闭该 task 已有的 PeerConnection（防止重复连接）
+    old_pc = _webrtc_pcs.pop(task_id, None)
+    if old_pc:
+        try:
+            await old_pc.close()
+        except Exception:
+            pass
+
     frame_queue = _frame_queues.get(task_id)
     use_queue = frame_queue is not None
     frames_dir = _get_browser_frames_dir(task_id) if not use_queue else None
 
     # 创建 PeerConnection
     pc = RTCPeerConnection()
+    _webrtc_pcs[task_id] = pc
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        logger.info("WebRTC 连接状态: %s → %s, task=%s", pc.connectionState, pc.connectionState, task_id)
+        logger.info("WebRTC 连接状态: %s, task=%s", pc.connectionState, task_id)
         if pc.connectionState in ("failed", "closed", "disconnected"):
-            await pc.close()
+            _webrtc_pcs.pop(task_id, None)
+            try:
+                await pc.close()
+            except Exception:
+                pass
 
     # 设置远程描述（浏览器的 offer）
     offer = RTCSessionDescription(sdp=req.sdp, type=req.type)

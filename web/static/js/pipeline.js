@@ -781,25 +781,31 @@ function setupWebRTCCamera(taskId, stream) {
   async function connect() {
     try {
       pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [],  // 局域网无需 STUN/TURN
       });
 
       // 添加摄像头轨道
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-      // ICE 候选收集完毕后再发送 offer（减少信令往返）
+      // ICE 候选收集（带超时，防止永远挂起）
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // 等 ICE 完成
       await new Promise((resolve) => {
         if (pc.iceGatheringState === 'complete') {
           resolve();
-        } else {
-          pc.addEventListener('icegatheringstatechange', () => {
-            if (pc.iceGatheringState === 'complete') resolve();
-          });
+          return;
         }
+        const timer = setTimeout(() => {
+          // 超时也继续，用已收集的候选
+          resolve();
+        }, 3000);
+        pc.addEventListener('icegatheringstatechange', () => {
+          if (pc.iceGatheringState === 'complete') {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
       });
 
       // 发送 offer 给服务器
