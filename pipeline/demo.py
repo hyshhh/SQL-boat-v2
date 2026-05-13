@@ -1,84 +1,19 @@
 """
 Demo 模块 — 视频演示可视化
 
-支持：检测框 + 跟踪 ID + 识别结果叠加 + FPS HUD + 中文字体渲染
+支持：检测框 + 跟踪 ID + 识别结果叠加 + FPS HUD
+纯 OpenCV 渲染，无 PIL 依赖。
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-# ── 中文字体支持（PIL 渲染，带缓存优化）──
-_cjk_font = None
-_pil_available = False
-
-try:
-    from PIL import Image, ImageDraw, ImageFont
-    _pil_available = True
-
-    _CJK_FONT_CANDIDATES = [
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    ]
-
-    def _load_cjk_font(size: int):
-        for path in _CJK_FONT_CANDIDATES:
-            if Path(path).exists():
-                try:
-                    return ImageFont.truetype(path, size)
-                except Exception:
-                    continue
-        return ImageFont.load_default()
-
-    _cjk_font = _load_cjk_font(16)
-except ImportError:
-    pass
-
-# 文字尺寸缓存（避免每帧重复计算 textbbox）
-_text_size_cache: dict[str, tuple[int, int]] = {}
-_TEXT_CACHE_MAX = 200
-
-
-def _get_text_size(text: str, font) -> tuple[int, int]:
-    """获取文字尺寸（带缓存）。"""
-    cached = _text_size_cache.get(text)
-    if cached is not None:
-        return cached
-    # 创建临时 PIL Image 测量尺寸（只需一次）
-    tmp = Image.new("RGB", (1, 1))
-    draw = ImageDraw.Draw(tmp)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
-    if len(_text_size_cache) < _TEXT_CACHE_MAX:
-        _text_size_cache[text] = size
-    return size
-
-
-def _pil_put_text(img: np.ndarray, text: str, x: int, y: int, fill: tuple[int, int, int] = (255, 255, 255)) -> tuple[int, int]:
-    """用 PIL 在 numpy 图像上绘制中文文字（优化版：直接操作像素数组）。"""
-    # 只转换需要绘制的 ROI 区域，而非整张图
-    tw, th = _get_text_size(text, _cjk_font)
-    h, w = img.shape[:2]
-    # 计算 ROI（带边距）
-    rx1, ry1 = max(0, x), max(0, y)
-    rx2, ry2 = min(w, x + tw + 2), min(h, y + th + 2)
-    if rx2 <= rx1 or ry2 <= ry1:
-        return tw, th
-    # 只转换 ROI 区域
-    roi = img[ry1:ry2, rx1:rx2]
-    pil_roi = Image.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil_roi)
-    draw.text((x - rx1, y - ry1), text, font=_cjk_font, fill=fill)
-    img[ry1:ry2, rx1:rx2] = cv2.cvtColor(np.array(pil_roi), cv2.COLOR_RGB2BGR)
-    return tw, th
 
 
 class DemoRenderer:
@@ -139,38 +74,23 @@ class DemoRenderer:
     @staticmethod
     def _get_display_text(track_info: Any) -> str:
         if not getattr(track_info, "recognized", False):
-            return "(识别中...)" if getattr(track_info, "pending", False) else ""
+            return "(detecting...)" if getattr(track_info, "pending", False) else ""
         if getattr(track_info, "db_matched", False):
-            return f"(库内确定id：{getattr(track_info, 'db_match_id', '')})"
+            return f"(DB match: {getattr(track_info, 'db_match_id', '')})"
         hull_number = getattr(track_info, "hull_number", "") or ""
         semantic_ids = getattr(track_info, "semantic_match_ids", []) or []
         desc = getattr(track_info, "description", "")[:15]
         if hull_number and semantic_ids:
-            return f"(未知id：{hull_number} 可能：{'/'.join(semantic_ids[:3])})"
+            return f"(unknown: {hull_number} maybe: {'/'.join(semantic_ids[:3])})"
         if hull_number:
-            return f"(未知id：{hull_number} - {desc})" if desc else f"(未知id：{hull_number})"
+            return f"(unknown: {hull_number} - {desc})" if desc else f"(unknown: {hull_number})"
         if semantic_ids:
-            return f"(未知id：无 可能：{'/'.join(semantic_ids[:3])})"
-        return "(未知id：无)"
+            return f"(unknown: none, maybe: {'/'.join(semantic_ids[:3])})"
+        return "(unknown)"
 
     def _render_label(self, canvas: np.ndarray, text: str, x: int, y: int, color: tuple[int, int, int]) -> None:
-        # 快速路径：纯 ASCII 文字直接用 OpenCV（零 PIL 开销）
-        if text.isascii():
-            tw = len(text) * 10
-            cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + 22), color, -1)
-            cv2.putText(canvas, text, (x + 3, y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-            return
-        # 含中文：用 PIL 渲染（带缓存 + ROI 优化）
-        if _pil_available and _cjk_font:
-            try:
-                tw, th = _get_text_size(text, _cjk_font)
-                cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + th + 10), color, -1)
-                _pil_put_text(canvas, text, x + 3, y + 4, fill=(255, 255, 255))
-                return
-            except Exception:
-                pass
-        # 回退
-        cv2.rectangle(canvas, (x, y + 2), (x + len(text) * 10 + 6, y + 22), color, -1)
+        tw = len(text) * 10
+        cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + 22), color, -1)
         cv2.putText(canvas, text, (x + 3, y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
     def _render_hud(self, canvas: np.ndarray, fps_info: dict[str, float], frame_id: int, queue_depth: int, max_queue: int) -> None:
