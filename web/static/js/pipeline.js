@@ -242,7 +242,6 @@ async function startVideoPipeline() {
       body: JSON.stringify({
         video_filename: selectedVideo,
         concurrent_mode: document.getElementById('optConcurrent').checked,
-        yolo_async: document.getElementById('optYoloAsync').checked,
         ...collectVideoParams(),
       }),
     });
@@ -670,7 +669,6 @@ async function startBrowserCamera() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
-        yolo_async: document.getElementById('camOptYoloAsync').checked,
         ...collectCameraParams(),
       }),
     });
@@ -832,7 +830,6 @@ async function startCameraPipeline() {
       body: JSON.stringify({
         video_filename: videoFilename,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
-        yolo_async: document.getElementById('camOptYoloAsync').checked,
         ...collectCameraParams(),
       }),
     });

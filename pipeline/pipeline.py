@@ -10,7 +10,7 @@ ShipPipeline — 主流水线编排
   YOLO 检测 → 三步链路 → 绑定结果 → 绘制输出
 
 并发模式（concurrent_mode=true）：
-  YOLO 检测 → crop 送入队列 → worker 线程异步推理
+  YOLO 检测（主循环同步）→ crop 送入队列 → VLM worker 线程并发推理
   → 结果按帧时间戳严格顺序出队 → 绑定到对应帧绘制输出
 """
 
@@ -59,7 +59,6 @@ class ShipPipeline:
         pipe_cfg = config.get("pipeline", {})
 
         self._concurrent_mode: bool = bool(pipe_cfg.get("concurrent_mode", False))
-        self._yolo_async: bool = bool(pipe_cfg.get("yolo_async", False))
         self._max_concurrent: int = pipe_cfg.get("max_concurrent") or 4
         self._max_queued_frames: int = pipe_cfg.get("max_queued_frames") or 30
         self._target_fps: float = float(pipe_cfg.get("target_fps", 0))  # 0=不限制
@@ -97,16 +96,11 @@ class ShipPipeline:
         output_dir = pipe_cfg.get("output_dir", "./output")
         self._saver = ScreenshotSaver(output_dir=output_dir)
 
-        # 并发模式
+        # 并发模式（VLM worker 线程池）
         self._task_queue: queue.Queue = queue.Queue(maxsize=self._max_queued_frames)
         self._result_queue: queue.Queue = queue.Queue(maxsize=self._max_queued_frames)
         self._workers: list[threading.Thread] = []
         self._stop_event = threading.Event()
-
-        # YOLO 异步检测（yolo_async 模式）
-        self._yolo_frame_queue: queue.Queue = queue.Queue(maxsize=2)
-        self._yolo_result_queue: queue.Queue = queue.Queue(maxsize=2)
-        self._yolo_thread: threading.Thread | None = None
 
         # 背压控制：跟踪管道积压
         self._frames_submitted: int = 0   # 主循环已提交到 raw_writer 的帧数
@@ -122,8 +116,9 @@ class ShipPipeline:
         self._cached_display_frame: np.ndarray | None = None
 
         logger.info(
-            "ShipPipeline 初始化: mode=%s, process_every=%d, refresh=%s(gap=%d)",
+            "ShipPipeline 初始化: mode=%s, workers=%d, process_every=%d, refresh=%s(gap=%d)",
             "concurrent" if self._concurrent_mode else "cascade",
+            self._max_concurrent,
             self._process_every_n,
             "on" if self._enable_refresh else "off",
             self._gap_num,
@@ -316,79 +311,6 @@ class ShipPipeline:
             except queue.Empty:
                 break
         return count
-
-    # ── YOLO 异步检测线程 ─────────────────────
-
-    def _yolo_detect_loop(self) -> None:
-        """独立线程：从队列取帧 → YOLO 检测 → 结果入队。主循环不再阻塞。"""
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    item = self._yolo_frame_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                if item is None:  # 哨兵值，退出
-                    break
-                frame, frame_id = item
-                try:
-                    with self._latency.measure("yolo"):
-                        detections = self._detector.detect(frame, frame_id)
-                except Exception as e:
-                    logger.error("YOLO 异步检测异常 (frame=%d): %s", frame_id, e)
-                    detections = []
-                try:
-                    self._yolo_result_queue.put_nowait((frame_id, detections))
-                except queue.Full:
-                    # 队列满，丢掉最旧的
-                    try:
-                        self._yolo_result_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        self._yolo_result_queue.put_nowait((frame_id, detections))
-                    except queue.Full:
-                        pass
-        except Exception:
-            logger.exception("YOLO 检测线程意外退出")
-
-    def _start_yolo_thread(self) -> None:
-        self._yolo_thread = threading.Thread(target=self._yolo_detect_loop, name="yolo-detector", daemon=True)
-        self._yolo_thread.start()
-        logger.info("YOLO 异步检测线程已启动")
-
-    def _stop_yolo_thread(self) -> None:
-        if self._yolo_thread and self._yolo_thread.is_alive():
-            try:
-                self._yolo_frame_queue.put_nowait(None)  # 哨兵值
-            except queue.Full:
-                pass
-            self._yolo_thread.join(timeout=5.0)
-            self._yolo_thread = None
-        # 清空残留
-        while True:
-            try:
-                self._yolo_frame_queue.get_nowait()
-            except queue.Empty:
-                break
-        while True:
-            try:
-                self._yolo_result_queue.get_nowait()
-            except queue.Empty:
-                break
-
-    def _drain_yolo_results(self) -> tuple[int, list[Detection]]:
-        """取最新的 YOLO 检测结果（只保留最新一帧，丢弃中间帧）。"""
-        latest_frame_id = -1
-        latest_detections: list[Detection] = []
-        while True:
-            try:
-                frame_id, detections = self._yolo_result_queue.get_nowait()
-                if frame_id >= latest_frame_id:
-                    latest_frame_id = frame_id
-                    latest_detections = detections
-            except queue.Empty:
-                break
-        return latest_frame_id, latest_detections
 
     def _start_workers(self) -> None:
         self._stop_event.clear()
@@ -694,12 +616,10 @@ class ShipPipeline:
 
             if self._concurrent_mode:
                 self._start_workers()
-            if self._yolo_async:
-                self._start_yolo_thread()
 
-            logger.info("开始处理: source=%s, mode=%s, yolo_async=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
+            logger.info("开始处理: source=%s, mode=%s, workers=%d, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
                         source, "concurrent" if self._concurrent_mode else "cascade",
-                        "on" if self._yolo_async else "off",
+                        self._max_concurrent,
                         "on" if self._enable_refresh else "off", self._gap_num, self._detect_every_n, self._process_every_n)
 
             # 停止信号文件路径（外部可以通过创建此文件来请求停止）
@@ -725,35 +645,18 @@ class ShipPipeline:
 
                 self._fps.tick("stream")
 
-                # YOLO 检测（同步 or 异步）
-                if self._yolo_async:
-                    # 异步模式：提交帧到 YOLO 线程，取最新结果
-                    should_detect = (frame_id % self._detect_every_n == 0)
-                    if should_detect:
-                        try:
-                            self._yolo_frame_queue.put_nowait((frame.copy(), frame_id))
-                        except queue.Full:
-                            pass  # YOLO 线程忙，跳过此帧
-                    # 取最新的检测结果
-                    yolo_fid, yolo_dets = self._drain_yolo_results()
-                    if yolo_fid >= 0:
-                        detections = yolo_dets
-                        last_detections = detections
-                    else:
-                        detections = last_detections
+                # YOLO 检测（主循环同步）
+                should_detect = (frame_id % self._detect_every_n == 0)
+                if should_detect:
+                    try:
+                        with self._latency.measure("yolo"):
+                            detections = self._detector.detect(frame, frame_id)
+                    except Exception as e:
+                        logger.error("YOLO 检测异常 (frame=%d): %s", frame_id, e)
+                        detections = []
+                    last_detections = detections
                 else:
-                    # 同步模式（原有逻辑）
-                    should_detect = (frame_id % self._detect_every_n == 0)
-                    if should_detect:
-                        try:
-                            with self._latency.measure("yolo"):
-                                detections = self._detector.detect(frame, frame_id)
-                        except Exception as e:
-                            logger.error("YOLO 检测异常 (frame=%d): %s", frame_id, e)
-                            detections = []
-                        last_detections = detections
-                    else:
-                        detections = last_detections
+                    detections = last_detections
 
                 total_detections += len(detections)
 
@@ -893,8 +796,6 @@ class ShipPipeline:
             return {"total_frames": frame_id, "interrupted": True}
 
         finally:
-            if self._yolo_async:
-                self._stop_yolo_thread()
             if self._concurrent_mode:
                 self._stop_workers()
             if raw_writer:

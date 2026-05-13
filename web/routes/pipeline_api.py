@@ -111,7 +111,6 @@ def _get_stream_dir(task_id: str) -> Path:
 class PipelineStartRequest(BaseModel):
     video_filename: str
     concurrent_mode: bool = True
-    yolo_async: bool = False
     display: bool = False
     # ── 核心检测参数 ──
     conf_threshold: float = 0.25
@@ -131,7 +130,6 @@ class PipelineStartRequest(BaseModel):
 
 class BrowserCameraStartRequest(BaseModel):
     concurrent_mode: bool = True
-    yolo_async: bool = False
     # ── 核心检测参数 ──
     conf_threshold: float = 0.25
     iou_threshold: float = 0.45
@@ -624,8 +622,6 @@ async def start_pipeline(req: PipelineStartRequest):
     ]
     if req.concurrent_mode:
         cmd.extend(["-c", "--max-concurrent", str(req.max_concurrent or pipeline_cfg.get("max_concurrent", 4))])
-    if req.yolo_async:
-        cmd.append("--yolo-async")
 
     # ── 核心检测参数 ──
     cmd.extend(["--conf", str(req.conf_threshold)])
@@ -1517,7 +1513,6 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         pipe_cfg = dict(pipeline_cfg)
         pipe_cfg.update({
             "concurrent_mode": req.concurrent_mode,
-            "yolo_async": req.yolo_async,
             "conf_threshold": req.conf_threshold,
             "iou_threshold": req.iou_threshold,
             "process_every_n_frames": req.process_every,

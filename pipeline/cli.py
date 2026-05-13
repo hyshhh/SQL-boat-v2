@@ -28,8 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", "-o", help="输出视频路径（如 result.mp4）")
     parser.add_argument("--demo", action="store_true", default=None, help="开启 demo 模式（绘制检测框和识别结果）")
     parser.add_argument("--display", action="store_true", help="实时显示窗口（需要有显示器）")
-    parser.add_argument("--concurrent", "-c", action="store_true", default=None, help="使用并发模式")
-    parser.add_argument("--yolo-async", action="store_true", default=None, help="YOLO 检测异步线程化（主循环不阻塞）")
+    parser.add_argument("--concurrent", "-c", action="store_true", default=None, help="使用并发模式（YOLO 同步检测 + VLM 线程池并发推理）")
     parser.add_argument("--no-screenshots", action="store_true", default=None, help="关闭自动截图保存")
     parser.add_argument("--max-concurrent", type=int, default=None, help="最大并发推理数（默认 4）")
     parser.add_argument("--max-queued-frames", type=int, default=None, help="最大队列深度（默认 30）")
@@ -63,8 +62,6 @@ def _merge_args_to_config(args, config: dict) -> dict:
     config.setdefault("pipeline", {})
     if args.concurrent is not None:
         config["pipeline"]["concurrent_mode"] = args.concurrent
-    if getattr(args, 'yolo_async', None) is not None:
-        config["pipeline"]["yolo_async"] = args.yolo_async
     if args.max_concurrent is not None:
         config["pipeline"]["max_concurrent"] = args.max_concurrent
     if args.max_queued_frames is not None:
@@ -115,7 +112,6 @@ def _print_config(args, config: dict) -> None:
     """打印启动配置（纯文本，兼容 subprocess stderr 捕获）。"""
     pipe_cfg = config.get("pipeline", {})
     concurrent_mode = pipe_cfg.get("concurrent_mode", False)
-    yolo_async = pipe_cfg.get("yolo_async", False)
     max_concurrent = pipe_cfg.get("max_concurrent", 4)
     enable_refresh = pipe_cfg.get("enable_refresh", False)
     gap_num = pipe_cfg.get("gap_num", 150)
@@ -133,7 +129,6 @@ def _print_config(args, config: dict) -> None:
         "┌─ Pipeline 启动配置 ─────────────────────┐",
         f"│  输入源:    {source_label}",
         f"│  模式:      {'并发' if concurrent_mode else '级联'}",
-        f"│  YOLO 异步: {'开启' if yolo_async else '关闭'}",
         f"│  检测间隔:  每 {detect_every} 帧 | 推理间隔: 每 {process_every} 帧",
         f"│  并发数:    {max_concurrent}",
         f"│  刷新:      {'开启 (每%d帧)' % gap_num if enable_refresh else '关闭'}",
