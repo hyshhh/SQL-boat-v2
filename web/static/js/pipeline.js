@@ -778,13 +778,10 @@ function setupMjpegCameraWs(wsUrl, stream) {
 function setupH264CameraWs(wsUrl, stream) {
   let mediaRecorder = null;
 
-  // 选择最佳 H264 编码格式
+  // 选择编码格式（仅 H264）
   const codecOptions = [
-    'video/webm; codecs=vp9',
-    'video/webm; codecs=vp8',
-    'video/webm; codecs=h264',
     'video/mp4; codecs=h264',
-    'video/webm',
+    'video/webm; codecs=h264',
   ];
   let selectedCodec = '';
   for (const opt of codecOptions) {
