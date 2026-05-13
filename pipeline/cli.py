@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--demo", action="store_true", default=None, help="开启 demo 模式（绘制检测框和识别结果）")
     parser.add_argument("--display", action="store_true", help="实时显示窗口（需要有显示器）")
     parser.add_argument("--concurrent", "-c", action="store_true", default=None, help="使用并发模式")
+    parser.add_argument("--yolo-async", action="store_true", default=None, help="YOLO 检测异步线程化（主循环不阻塞）")
     parser.add_argument("--no-screenshots", action="store_true", default=None, help="关闭自动截图保存")
     parser.add_argument("--max-concurrent", type=int, default=None, help="最大并发推理数（默认 4）")
     parser.add_argument("--max-queued-frames", type=int, default=None, help="最大队列深度（默认 30）")
@@ -62,6 +63,8 @@ def _merge_args_to_config(args, config: dict) -> dict:
     config.setdefault("pipeline", {})
     if args.concurrent is not None:
         config["pipeline"]["concurrent_mode"] = args.concurrent
+    if getattr(args, 'yolo_async', None) is not None:
+        config["pipeline"]["yolo_async"] = args.yolo_async
     if args.max_concurrent is not None:
         config["pipeline"]["max_concurrent"] = args.max_concurrent
     if args.max_queued_frames is not None:
@@ -110,6 +113,7 @@ def _print_config(args, config: dict) -> None:
     """打印启动配置面板。"""
     pipe_cfg = config.get("pipeline", {})
     concurrent_mode = pipe_cfg.get("concurrent_mode", False)
+    yolo_async = pipe_cfg.get("yolo_async", False)
     max_concurrent = pipe_cfg.get("max_concurrent", 4)
     enable_refresh = pipe_cfg.get("enable_refresh", False)
     gap_num = pipe_cfg.get("gap_num", 150)
@@ -125,6 +129,7 @@ def _print_config(args, config: dict) -> None:
         f"[bold]🚢 船弦号识别视频流水线[/bold]\n\n"
         f"输入源: [cyan]{source_label}[/cyan]\n"
         f"模式: [{'green' if concurrent_mode else 'yellow'}]{'并发' if concurrent_mode else '级联'}[/]\n"
+        f"YOLO 异步: [{'green' if yolo_async else 'dim'}]{'开启' if yolo_async else '关闭'}[/]\n"
         f"推理: [blue]三步链路 (VLM→Lookup→Retrieve)[/]\n"
         f"并发数: {max_concurrent}\n"
         f"定时刷新: {'[green]开启[/green] (每%d帧)' % gap_num if enable_refresh else '[dim]关闭[/dim]'}\n"

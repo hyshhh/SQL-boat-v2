@@ -240,6 +240,7 @@ async function startVideoPipeline() {
       body: JSON.stringify({
         video_filename: selectedVideo,
         concurrent_mode: document.getElementById('optConcurrent').checked,
+        yolo_async: document.getElementById('optYoloAsync').checked,
         ...collectVideoParams(),
       }),
     });
@@ -667,6 +668,7 @@ async function startBrowserCamera() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
+        yolo_async: document.getElementById('camOptYoloAsync').checked,
         ...collectCameraParams(),
       }),
     });
@@ -681,7 +683,6 @@ async function startBrowserCamera() {
     function setupWsHandlers(ws) {
       ws.onopen = () => {
         showToast('摄像头已连接，开始推流');
-        document.getElementById('cameraStatusCard').style.display = '';
         updateCameraStatus('running', '浏览器摄像头推流中...');
         document.getElementById('btnStartCamera').style.display = 'none';
         document.getElementById('btnStopCamera').style.display = '';
@@ -829,6 +830,7 @@ async function startCameraPipeline() {
       body: JSON.stringify({
         video_filename: videoFilename,
         concurrent_mode: document.getElementById('camOptConcurrent').checked,
+        yolo_async: document.getElementById('camOptYoloAsync').checked,
         ...collectCameraParams(),
       }),
     });
@@ -836,7 +838,6 @@ async function startCameraPipeline() {
     if (!resp.ok) throw new Error(data.detail || '启动失败');
 
     cameraTaskId = data.task_id;
-    document.getElementById('cameraStatusCard').style.display = '';
     updateCameraStatus('running', '摄像头识别运行中...');
     document.getElementById('btnStartCamera').style.display = 'none';
     document.getElementById('btnStopCamera').style.display = '';

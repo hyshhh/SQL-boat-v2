@@ -151,6 +151,9 @@
             <label class="checkbox-label">
               <input type="checkbox" id="optConcurrent" checked /> 并发模式
             </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="optYoloAsync" /> YOLO 异步
+            </label>
           </div>
 
           <!-- 核心参数 -->
@@ -224,51 +227,102 @@
   </div>
 
   <!-- ═══════════════════════════════════════════ -->
-  <!-- Tab 3: 摄像头 Demo -->
+  <!-- Tab 3: 摄像头 Demo（双栏布局） -->
   <!-- ═══════════════════════════════════════════ -->
   <div class="tab-content" id="tab-camera-demo">
+    <div class="demo-layout" style="display:flex;gap:20px;align-items:flex-start">
+      <div class="demo-main" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:20px">
 
-    <!-- 摄像头配置 -->
-    <div class="section-card">
-      <h3 class="section-title">📷 摄像头 / RTSP 配置</h3>
-      <div class="camera-config">
-        <div class="form-row">
-          <label>输入源</label>
-          <div class="input-group">
-            <select id="cameraSource" onchange="onCameraSourceChange()">
-              <option value="browser">本地摄像头（浏览器）</option>
-              <option value="0">服务器摄像头 (0)</option>
-              <option value="rtsp">RTSP 流</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input type="text" id="cameraUrl" placeholder="rtsp://192.168.1.100/stream" style="display:none" />
+        <!-- Pipeline 控制 + 实时预览 -->
+        <div class="section-card" id="cameraPipelineControl">
+          <div class="section-header">
+            <h3 class="section-title">📷 实时预览</h3>
+            <div class="pipeline-actions">
+              <button class="btn btn-primary btn-sm" id="btnStartCamera" onclick="startCameraPipeline()">▶ 启动摄像头识别</button>
+              <button class="btn btn-danger btn-sm" id="btnStopCamera" onclick="stopCameraPipeline()" style="display:none">⏹ 停止</button>
+            </div>
           </div>
-        </div>
 
-        <!-- 浏览器摄像头预览 -->
-        <div class="form-row" id="browserCameraPreviewRow">
-          <label>摄像头预览</label>
-          <div class="camera-preview-wrap">
-            <video id="browserCameraPreview" autoplay playsinline muted></video>
-            <div id="browserCameraPreviewPlaceholder" class="video-placeholder" style="min-height:200px">
+          <!-- 状态条 -->
+          <div id="cameraStatus" class="pipeline-status">
+            <span class="status-dot idle"></span>
+            <span id="cameraStatusText">未启动</span>
+          </div>
+
+          <!-- 浏览器摄像头预览 -->
+          <div class="form-row" id="browserCameraPreviewRow">
+            <div class="camera-preview-wrap">
+              <video id="browserCameraPreview" autoplay playsinline muted></video>
+              <div id="browserCameraPreviewPlaceholder" class="video-placeholder" style="min-height:200px">
+                <span>📷</span>
+                <p>点击"启动"后授权摄像头</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 视频流输出 -->
+          <div id="cameraOutput" class="camera-output">
+            <video id="cameraStream" class="demo-video" autoplay muted playsinline style="display:none;max-width:100%;border-radius:8px;background:#000"></video>
+            <div id="cameraStreamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px;display:none"></div>
+            <div id="cameraStreamPlaceholder" class="video-placeholder">
               <span>📷</span>
-              <p>点击"启动"后授权摄像头</p>
+              <p>启动后显示实时画面</p>
             </div>
           </div>
         </div>
 
-        <div class="form-row">
-          <label>处理选项</label>
-          <div class="pipeline-options">
-            <label class="checkbox-label">
-              <input type="checkbox" id="camOptConcurrent" checked /> 并发模式
-            </label>
+        <!-- 使用说明 -->
+        <div class="section-card">
+          <h3 class="section-title">💡 使用说明</h3>
+          <div class="help-content">
+            <ul>
+              <li><strong>本地摄像头</strong>：选择输入源为"本地摄像头"，确保设备有可用摄像头</li>
+              <li><strong>RTSP 流</strong>：选择"RTSP 流"后填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
+              <li><strong>自定义</strong>：支持视频文件路径或任意 OpenCV 支持的输入源</li>
+              <li>处理结果将保存到 <code>demo_output</code> 目录</li>
+              <li>后端仍可通过 CLI 独立运行 pipeline</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 右栏：配置 ── -->
+      <div class="demo-sidebar" style="width:340px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
+
+        <!-- 输入源配置 -->
+        <div class="section-card">
+          <h3 class="section-title">📷 输入源配置</h3>
+          <div class="camera-config">
+            <div class="form-row">
+              <label>输入源</label>
+              <div class="input-group">
+                <select id="cameraSource" onchange="onCameraSourceChange()">
+                  <option value="browser">本地摄像头（浏览器）</option>
+                  <option value="0">服务器摄像头 (0)</option>
+                  <option value="rtsp">RTSP 流</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <input type="text" id="cameraUrl" placeholder="rtsp://192.168.1.100/stream" style="display:none" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label>处理选项</label>
+              <div class="pipeline-options">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="camOptConcurrent" checked /> 并发模式
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="camOptYoloAsync" /> YOLO 异步
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 核心参数 -->
-        <div class="form-row">
-          <label>检测参数</label>
+        <!-- 检测参数 -->
+        <div class="section-card">
+          <h3 class="section-title">⚙️ 检测参数</h3>
           <div class="param-grid">
             <div class="param-item">
               <label>置信度阈值 <span class="param-val" id="camConfVal">0.25</span></label>
@@ -289,87 +343,52 @@
               <input type="number" id="camDetectEvery" value="2" min="1" max="100" />
             </div>
           </div>
-        </div>
 
-        <!-- 高级参数 (折叠) -->
-        <details class="advanced-params">
-          <summary>⚙️ 高级参数</summary>
-          <div class="param-grid">
-            <div class="param-item">
-              <label>最大处理帧数 (0=不限)</label>
-              <input type="number" id="camMaxFrames" value="0" min="0" />
+          <!-- 高级参数 (折叠) -->
+          <details class="advanced-params">
+            <summary>⚙️ 高级参数</summary>
+            <div class="param-grid">
+              <div class="param-item">
+                <label>最大处理帧数 (0=不限)</label>
+                <input type="number" id="camMaxFrames" value="0" min="0" />
+              </div>
+              <div class="param-item">
+                <label>计算设备</label>
+                <select id="camDevice">
+                  <option value="">自动</option>
+                  <option value="cpu">CPU</option>
+                  <option value="0">GPU 0</option>
+                </select>
+              </div>
+              <div class="param-item">
+                <label>YOLO 模型</label>
+                <input type="text" id="camYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
+              </div>
+              <div class="param-item">
+                <label>VLM 提示模式</label>
+                <select id="camPromptMode">
+                  <option value="detailed">详细</option>
+                  <option value="brief">简洁</option>
+                </select>
+              </div>
+              <div class="param-item">
+                <label>最大并发数</label>
+                <input type="number" id="camMaxConcurrent" value="4" min="1" max="16" />
+              </div>
+              <div class="param-item">
+                <label>刷新间隔 (帧)</label>
+                <input type="number" id="camGapNum" value="150" min="1" />
+              </div>
+              <div class="param-item param-checkbox">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="camEnableRefresh" /> 定时刷新识别
+                </label>
+              </div>
             </div>
-            <div class="param-item">
-              <label>计算设备</label>
-              <select id="camDevice">
-                <option value="">自动</option>
-                <option value="cpu">CPU</option>
-                <option value="0">GPU 0</option>
-              </select>
-            </div>
-            <div class="param-item">
-              <label>YOLO 模型</label>
-              <input type="text" id="camYoloModel" value="yolov8n.pt" placeholder="yolov8n.pt" />
-            </div>
-            <div class="param-item">
-              <label>VLM 提示模式</label>
-              <select id="camPromptMode">
-                <option value="detailed">详细</option>
-                <option value="brief">简洁</option>
-              </select>
-            </div>
-            <div class="param-item">
-              <label>最大并发数</label>
-              <input type="number" id="camMaxConcurrent" value="4" min="1" max="16" />
-            </div>
-            <div class="param-item">
-              <label>刷新间隔 (帧)</label>
-              <input type="number" id="camGapNum" value="150" min="1" />
-            </div>
-            <div class="param-item param-checkbox">
-              <label class="checkbox-label">
-                <input type="checkbox" id="camEnableRefresh" /> 定时刷新识别
-              </label>
-            </div>
-          </div>
-        </details>
-        <div class="form-actions">
-          <button class="btn btn-primary" id="btnStartCamera" onclick="startCameraPipeline()">▶ 启动摄像头识别</button>
-          <button class="btn btn-danger" id="btnStopCamera" onclick="stopCameraPipeline()" style="display:none">⏹ 停止</button>
+          </details>
         </div>
       </div>
-    </div>
 
-    <!-- 状态 -->
-    <div class="section-card" id="cameraStatusCard" style="display:none">
-      <h3 class="section-title">📊 运行状态</h3>
-      <div id="cameraStatus" class="pipeline-status">
-        <span class="status-dot idle"></span>
-        <span id="cameraStatusText">未启动</span>
-      </div>
-      <div id="cameraOutput" class="camera-output">
-        <!-- H.264 实时流：用 video 标签 + MSE 播放 -->
-        <video id="cameraStream" class="demo-video" autoplay muted playsinline style="display:none;max-width:100%;border-radius:8px;background:#000"></video>
-        <div id="cameraStreamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px;display:none"></div>
-        <div id="cameraStreamPlaceholder" class="video-placeholder">
-          <span>📷</span>
-          <p>启动后显示实时画面</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- 说明 -->
-    <div class="section-card">
-      <h3 class="section-title">💡 使用说明</h3>
-      <div class="help-content">
-        <ul>
-          <li><strong>本地摄像头</strong>：选择输入源为"本地摄像头"，确保设备有可用摄像头</li>
-          <li><strong>RTSP 流</strong>：选择"RTSP 流"后填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
-          <li><strong>自定义</strong>：支持视频文件路径或任意 OpenCV 支持的输入源</li>
-          <li>处理结果将保存到 <code>demo_output</code> 目录</li>
-          <li>后端仍可通过 CLI 独立运行 pipeline</li>
-        </ul>
-      </div>
     </div>
   </div>
 
