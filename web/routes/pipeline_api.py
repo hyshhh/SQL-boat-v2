@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import subprocess
 import sys
 import uuid
@@ -865,7 +866,7 @@ def _cleanup_old_tasks():
 
 
 def _cleanup_stream_dir(task_id: str):
-    """清理帧共享目录和停止信号文件"""
+    """清理帧共享目录、内存队列和停止信号文件"""
     import shutil
     d = Path("./_camera_frames") / task_id
     if d.exists():
@@ -874,6 +875,8 @@ def _cleanup_stream_dir(task_id: str):
     d2 = Path("./_browser_frames") / task_id
     if d2.exists():
         shutil.rmtree(d2, ignore_errors=True)
+    # 清理内存帧队列
+    _frame_queues.pop(task_id, None)
 
 
 async def _delayed_cleanup(task_id: str, delay: int = 10):
@@ -894,8 +897,12 @@ async def _delayed_cleanup(task_id: str, delay: int = 10):
     _cleanup_stream_dir(task_id)
 
 
+# ── 浏览器摄像头帧队列（内存直传，零磁盘 I/O）──
+_frame_queues: dict[str, queue.Queue] = {}  # task_id → Queue(numpy BGR frames)
+
+
 def _get_browser_frames_dir(task_id: str) -> Path:
-    """获取浏览器摄像头帧目录"""
+    """获取浏览器摄像头帧目录（仅作为 fallback）"""
     d = Path("./_browser_frames") / task_id
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -1492,20 +1499,29 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
 @router.websocket("/ws/camera/{task_id}")
 async def browser_camera_ws(websocket: WebSocket, task_id: str):
-    """WebSocket 端点 — 接收浏览器摄像头 JPEG 帧"""
+    """WebSocket 端点 — 接收浏览器摄像头 JPEG 帧，解码后直送内存队列（零磁盘 I/O）"""
     async with _state_lock:
         if task_id not in _task_status:
             await websocket.close(code=4004, reason="任务不存在")
             return
 
-    frames_dir = _get_browser_frames_dir(task_id)
     await websocket.accept()
     logger.info("浏览器摄像头 WebSocket 已连接: %s", task_id)
+
+    # 获取内存队列（pipeline 线程直接消费）
+    frame_queue = _frame_queues.get(task_id)
+    use_queue = frame_queue is not None
+
+    # fallback：无队列时写磁盘
+    frames_dir = _get_browser_frames_dir(task_id) if not use_queue else None
 
     async with _state_lock:
         _task_status[task_id]["progress"] = "摄像头已连接，推流中..."
 
     frame_count = 0
+    import cv2
+    import numpy as np
+
     try:
         while _task_status.get(task_id, {}).get("status") == "running":
             data = await websocket.receive_bytes()
@@ -1515,20 +1531,39 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
                 await websocket.send_json({"ok": False, "error": "非 JPEG 数据"})
                 continue
 
-            # 原子写入（用 asyncio.to_thread 避免阻塞事件循环）
-            frame_path = frames_dir / "latest.jpg"
-            tmp_path = frames_dir / "latest.jpg.tmp"
+            if use_queue:
+                # 内存直传：解码 JPEG → numpy → queue（零磁盘 I/O）
+                def _decode_and_enqueue():
+                    nparr = np.frombuffer(data, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        try:
+                            frame_queue.put_nowait(frame)
+                        except queue.Full:
+                            # 队列满，丢掉最旧帧
+                            try:
+                                frame_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            try:
+                                frame_queue.put_nowait(frame)
+                            except queue.Full:
+                                pass
+                await asyncio.to_thread(_decode_and_enqueue)
+            else:
+                # fallback：写磁盘
+                frame_path = frames_dir / "latest.jpg"
+                tmp_path = frames_dir / "latest.jpg.tmp"
 
-            def _write_frame():
-                tmp_path.write_bytes(data)
-                tmp_path.rename(frame_path)
+                def _write_frame():
+                    tmp_path.write_bytes(data)
+                    tmp_path.rename(frame_path)
 
-            await asyncio.to_thread(_write_frame)
+                await asyncio.to_thread(_write_frame)
 
             frame_count += 1
             if frame_count % 30 == 0:
                 logger.debug("浏览器摄像头帧计数: %d", frame_count)
-                # 每 30 帧发一次 ack（减少网络开销）
                 try:
                     await websocket.send_json({"ok": True, "frame": frame_count})
                 except Exception:
@@ -1540,12 +1575,15 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
         if "AssertionError" not in str(type(e).__name__):
             logger.error("浏览器摄像头 WebSocket 异常: %s", e)
     finally:
-        # WebSocket 断开 → 标记断开，但不立即终止 pipeline
-        # pipeline 会因帧目录被删/无新帧而自动退出
+        # 通知 pipeline 推流结束（发送哨兵值）
+        if use_queue and frame_queue:
+            try:
+                frame_queue.put_nowait(None)  # 哨兵值
+            except queue.Full:
+                pass
         logger.info("浏览器摄像头推流结束: %s (共 %d 帧)", task_id, frame_count)
         if task_id in _task_status and _task_status[task_id]["status"] == "running":
             _task_status[task_id]["progress"] = f"摄像头已断开（共接收 {frame_count} 帧），等待 pipeline 结束..."
-        # 延迟清理：给 pipeline 时间写完输出视频
         asyncio.create_task(_delayed_cleanup(task_id, delay=10))
 
 

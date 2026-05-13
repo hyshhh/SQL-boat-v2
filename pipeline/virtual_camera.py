@@ -1,16 +1,20 @@
 """
-VirtualCamera — 从帧目录读取最新 JPEG 帧
+VirtualCamera — 从帧目录或内存队列读取最新 JPEG 帧
+
+支持两种模式：
+1. 帧目录模式：从磁盘读取 latest.jpg（兼容旧架构）
+2. 内存队列模式：从 queue.Queue 直接读取 numpy 帧（零磁盘 I/O）
 
 配合浏览器摄像头 WebSocket 推流使用：
 - 前端 getUserMedia 捕获帧 → WebSocket 发送到服务器
-- 服务器写入帧目录（原子写入）
-- 本类从帧目录读取最新帧，模拟 cv2.VideoCapture 接口
+- 服务器解码后直接送入内存队列（或写入帧目录）
+- 本类从队列/目录读取帧，模拟 cv2.VideoCapture 接口
 """
 
 from __future__ import annotations
 
 import logging
-import os
+import queue
 import time
 from pathlib import Path
 
@@ -21,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 class VirtualCamera:
-    """从帧目录读取最新 JPEG 帧，模拟 cv2.VideoCapture 接口"""
+    """从帧目录或内存队列读取最新帧，模拟 cv2.VideoCapture 接口"""
 
-    def __init__(self, frames_dir: str | Path, fps: float = 15.0):
-        self._dir = Path(frames_dir)
+    def __init__(self, frames_dir: str | Path | None = None, fps: float = 15.0, frame_queue: queue.Queue | None = None):
+        self._dir = Path(frames_dir) if frames_dir else None
         self._fps = fps
         self._frame_interval = 1.0 / fps
         self._last_frame: np.ndarray | None = None
@@ -38,17 +42,37 @@ class VirtualCamera:
         self._height = 0
         self._first_frame_received = False
         self._startup_timeout: float = 15.0     # 等待第一帧的最大超时（秒）
+        self._queue = frame_queue               # 内存队列模式（零磁盘 I/O）
 
     def isOpened(self) -> bool:
         return self._opened
 
     def read(self) -> tuple[bool, np.ndarray | None]:
-        """读取最新帧，返回 (ret, frame)"""
+        """读取最新帧，返回 (ret, frame)。支持内存队列和磁盘两种模式。"""
         if not self._opened:
             return False, None
 
-        # 不再强制 sleep 节流 — pipeline 的处理速度本身就是帧率瓶颈，
-        # 额外 sleep 只会无意义地拉低帧率。帧率由浏览器端采集间隔控制。
+        # ── 内存队列模式（零磁盘 I/O）──
+        if self._queue is not None:
+            try:
+                frame = self._queue.get(timeout=0.5)
+                if frame is None:  # 哨兵值，表示推流结束
+                    self._opened = False
+                    return False, None
+                self._last_frame = frame
+                self._frame_count += 1
+                if self._width == 0:
+                    self._height, self._width = frame.shape[:2]
+                return True, frame
+            except queue.Empty:
+                # 队列空，返回上一帧（如果有）
+                if self._last_frame is not None:
+                    return True, self._last_frame.copy()
+                return False, None
+
+        # ── 磁盘模式（兼容旧架构）──
+        if not self._dir:
+            return False, None
 
         now = time.time()
 
