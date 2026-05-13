@@ -10,6 +10,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1787,13 +1788,32 @@ async def _receive_webrtc_camera_frames(
     logger.info("WebRTC 视频 track 已就绪: %s", task_id)
 
     try:
+        # 限流：按目标帧率控制消费速度（默认 15fps）
+        target_fps = 15
+        try:
+            config = load_config()
+            target_fps = config.get("pipeline", {}).get("target_fps", 15) or 15
+        except Exception:
+            pass
+        frame_interval = 1.0 / target_fps
+        last_frame_time = 0.0
+
         while True:
+            # 带超时的 recv，防止连接静默断开时永久挂起
             try:
-                frame = await video_track.recv()
+                frame = await asyncio.wait_for(video_track.recv(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("WebRTC 5秒未收到帧，断开: %s", task_id)
+                break
             except Exception as e:
-                # aiortc track 结束时抛 MediaStreamError，统一处理
                 logger.debug("WebRTC track recv 结束: %s", e)
                 break
+
+            # 帧率控制：跳过过早到达的帧
+            now = time.monotonic()
+            if now - last_frame_time < frame_interval:
+                continue
+            last_frame_time = now
 
             # aiortc VideoFrame → numpy BGR
             img = frame.to_ndarray(format="bgr24")
