@@ -1233,6 +1233,7 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
             logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
     finally:
         # 清理：取消发送任务，移除队列
+        st = None
         async with _state_lock:
             stream = _h264_streams.get(task_id)
             if stream:
