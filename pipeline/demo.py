@@ -154,16 +154,22 @@ class DemoRenderer:
         return "(未知id：无)"
 
     def _render_label(self, canvas: np.ndarray, text: str, x: int, y: int, color: tuple[int, int, int]) -> None:
+        # 快速路径：纯 ASCII 文字直接用 OpenCV（零 PIL 开销）
+        if text.isascii():
+            tw = len(text) * 10
+            cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + 22), color, -1)
+            cv2.putText(canvas, text, (x + 3, y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            return
+        # 含中文：用 PIL 渲染（带缓存 + ROI 优化）
         if _pil_available and _cjk_font:
             try:
-                # 使用缓存的尺寸查询，避免创建临时 PIL Image
                 tw, th = _get_text_size(text, _cjk_font)
                 cv2.rectangle(canvas, (x, y + 2), (x + tw + 6, y + th + 10), color, -1)
                 _pil_put_text(canvas, text, x + 3, y + 4, fill=(255, 255, 255))
                 return
             except Exception:
                 pass
-        # 回退到 OpenCV
+        # 回退
         cv2.rectangle(canvas, (x, y + 2), (x + len(text) * 10 + 6, y + 22), color, -1)
         cv2.putText(canvas, text, (x + 3, y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
