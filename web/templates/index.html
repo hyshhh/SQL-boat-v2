@@ -100,6 +100,15 @@
               <p>选择视频后点击"开始处理"</p>
             </div>
           </div>
+
+          <!-- Pipeline 识别日志 -->
+          <div id="pipelineLogBox" class="pipeline-log-box" style="display:none">
+            <div class="pipeline-log-header">
+              <span>识别日志</span>
+              <button class="btn btn-outline btn-sm" onclick="document.getElementById('pipelineLogContent').innerHTML=''">清空</button>
+            </div>
+            <div id="pipelineLogContent" class="pipeline-log-content"></div>
+          </div>
         </div>
 
         <!-- 历史任务 -->

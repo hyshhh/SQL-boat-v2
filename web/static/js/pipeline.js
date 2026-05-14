@@ -33,6 +33,8 @@ function switchTab(tabName) {
 let selectedVideo = null;
 let currentTaskId = null;
 let statusPollTimer = null;
+let logPollTimer = null;
+let _logIndex = 0;           // 已拉取的日志索引
 let streamWs = null;        // WebSocket 推流连接
 let _h264Ws = null;          // H.264 WebSocket
 let _h264MediaSource = null; // MediaSource
@@ -526,12 +528,23 @@ async function stopVideoPipeline() {
 function startStatusPolling() {
   stopStatusPolling();
   statusPollTimer = setInterval(pollTaskStatus, 2000);
+  // 启动日志轮询
+  _logIndex = 0;
+  const logBox = document.getElementById('pipelineLogBox');
+  if (logBox) logBox.style.display = '';
+  const logContent = document.getElementById('pipelineLogContent');
+  if (logContent) logContent.innerHTML = '';
+  logPollTimer = setInterval(pollPipelineLogs, 1500);
 }
 
 function stopStatusPolling() {
   if (statusPollTimer) {
     clearInterval(statusPollTimer);
     statusPollTimer = null;
+  }
+  if (logPollTimer) {
+    clearInterval(logPollTimer);
+    logPollTimer = null;
   }
 }
 
@@ -588,6 +601,33 @@ async function pollTaskStatus() {
   }
 }
 
+async function pollPipelineLogs() {
+  const taskId = currentTaskId;
+  if (!taskId) return;
+  try {
+    const resp = await fetch(`${PIPE_API}/logs/${taskId}?since=${_logIndex}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.logs && data.logs.length > 0) {
+      const box = document.getElementById('pipelineLogContent');
+      if (!box) return;
+      for (const entry of data.logs) {
+        const line = entry.line || '';
+        let cls = '';
+        if (line.includes('Step1')) cls = 'log-step1';
+        else if (line.includes('Step2')) cls = 'log-step2';
+        else if (line.includes('Step3')) cls = 'log-step3';
+        const div = document.createElement('div');
+        div.className = 'log-entry';
+        div.innerHTML = `<span class="log-time">${entry.time}</span><span class="${cls}">${line}</span>`;
+        box.appendChild(div);
+      }
+      _logIndex = data.total;
+      box.scrollTop = box.scrollHeight;
+    }
+  } catch (e) {}
+}
+
 function updatePipelineStatus(status, text) {
   const dot = document.querySelector('#pipelineStatus .status-dot');
   const statusText = document.getElementById('pipelineStatusText');
@@ -616,6 +656,8 @@ function _restoreResultPlaceholder() {
     resultPlaceholder.className = 'video-placeholder';
     resultPlaceholder.style.cssText = '';
   }
+  const logBox = document.getElementById('pipelineLogBox');
+  if (logBox) logBox.style.display = 'none';
 }
 
 // ── 任务历史 ──

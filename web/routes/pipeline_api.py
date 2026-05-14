@@ -54,6 +54,9 @@ _stop_signals: set[str] = set()  # 已发送停止信号的任务
 # 每个 task 的 ffmpeg 进程和 WebSocket 观众
 _h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, init_segment, ...}
 
+# ── Pipeline 日志缓冲 ──
+_pipeline_logs: dict[str, list[dict]] = {}  # task_id → [{time, line}, ...]
+
 
 def _get_demo_config() -> dict:
     config = load_config()
@@ -691,6 +694,7 @@ async def start_pipeline(req: PipelineStartRequest):
             "error": None,
             "is_camera": is_camera,
         }
+    _pipeline_logs[task_id] = []
 
     try:
         # 获取信号量（限制并发 pipeline 数量）
@@ -754,6 +758,15 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 async with _state_lock:
                     _task_status[task_id]["progress"] = text
 
+            # 捕获识别日志（Step1/Step2/Step3）
+            if "Step1" in text or "Step2" in text or "Step3" in text:
+                logs = _pipeline_logs.get(task_id)
+                if logs is not None:
+                    import time
+                    logs.append({"time": time.strftime("%H:%M:%S"), "line": text})
+                    if len(logs) > 200:
+                        del logs[:100]
+
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
                     import json
@@ -809,6 +822,15 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     t = _task_status[task_id]
     return TaskStatusResponse(**t)
+
+
+@router.get("/logs/{task_id}")
+async def get_pipeline_logs(task_id: str, since: int = 0):
+    """获取 Pipeline 识别日志（since 指定起始索引，用于增量拉取）"""
+    logs = _pipeline_logs.get(task_id)
+    if logs is None:
+        return {"logs": [], "total": 0}
+    return {"logs": logs[since:], "total": len(logs)}
 
 
 @router.post("/stop/{task_id}")

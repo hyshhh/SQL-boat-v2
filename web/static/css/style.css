@@ -626,3 +626,44 @@ tbody tr:hover { background: #f8f9fb; }
   color: var(--primary);
 }
 
+/* ── Pipeline 识别日志 ── */
+.pipeline-log-box {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pipeline-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.pipeline-log-content {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
+.pipeline-log-content .log-entry {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pipeline-log-content .log-time {
+  color: #6a9955;
+  margin-right: 6px;
+}
+.pipeline-log-content .log-step1 { color: #569cd6; }
+.pipeline-log-content .log-step2 { color: #dcdcaa; }
+.pipeline-log-content .log-step3 { color: #ce9178; }
+
