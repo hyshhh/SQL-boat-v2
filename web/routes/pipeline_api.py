@@ -1216,8 +1216,6 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
             await websocket.close(code=4004, reason="任务不存在")
             return
 
-    # 禁用 websockets 库内置 keepalive，防止 TCP 缓冲满时后台 ping 任务崩溃
-    websocket.ping_interval = None
     await websocket.accept()
 
     async with _state_lock:
@@ -1289,8 +1287,6 @@ async def ws_stream(websocket: WebSocket, task_id: str):
             await websocket.close(code=4004, reason="任务不存在")
             return
 
-    # 禁用 websockets 库内置 keepalive，防止 TCP 缓冲满时后台 ping 任务崩溃
-    websocket.ping_interval = None
     await websocket.accept()
 
     # 注册观众
@@ -1659,8 +1655,6 @@ async def browser_camera_ws(websocket: WebSocket, task_id: str):
             await websocket.close(code=4004, reason="任务不存在")
             return
 
-    # 禁用 websockets 库内置 keepalive，防止 TCP 缓冲满时后台 ping 任务崩溃
-    websocket.ping_interval = None
     await websocket.accept()
     logger.info("浏览器摄像头 WebSocket 已连接: %s", task_id)
 
