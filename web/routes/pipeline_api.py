@@ -1117,13 +1117,10 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
 async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
     """每观众独立发送任务：从队列取数据发送，慢观众自动丢帧
 
-    背压策略：
-    - send_bytes 超时 (1s) 时丢掉旧帧，清空队列取最新帧重发
-    - 连续超时 3 次说明客户端确实跟不上，断开连接
-    - 队列满时 _broadcast_h264 已自动丢旧帧
+    不对 send_bytes 使用 asyncio.wait_for 超时（会 cancel 协程并破坏
+    websockets 连接状态）。TCP 缓冲满时 send_bytes 自然阻塞实现背压，
+    队列满时 _broadcast_h264 自动丢旧帧。keepalive 已禁用，不会崩溃。
     """
-    timeout_count = 0
-    MAX_CONSECUTIVE_TIMEOUTS = 3
     try:
         while True:
             try:
@@ -1143,18 +1140,13 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
                 except Exception:
                     break
                 continue
-            # 发送帧数据（带 1s 超时）
-            if not await _send_with_backpressure(ws, queue, data):
-                timeout_count += 1
-                if timeout_count >= MAX_CONSECUTIVE_TIMEOUTS:
-                    logger.debug("观众连续 %d 次发送超时，断开: %s", timeout_count, task_id)
-                    break
-            else:
-                timeout_count = 0
+            # 直接发送，不使用 wait_for 超时
+            # TCP 缓冲满时自然阻塞（背压），队列满时 _broadcast_h264 自动丢旧帧
+            await ws.send_bytes(data)
     except asyncio.CancelledError:
         pass
     except Exception:
-        pass  # 抑制 websockets 库内部异常
+        pass
     finally:
         async with _state_lock:
             stream = _h264_streams.get(task_id)
@@ -1166,31 +1158,6 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
             await ws.close()
         except Exception:
             pass
-
-
-async def _send_with_backpressure(ws: WebSocket, queue: asyncio.Queue, data: bytes) -> bool:
-    """发送帧数据，TCP 缓冲满时丢旧帧取最新帧重试。返回 True=成功, False=失败"""
-    try:
-        await asyncio.wait_for(ws.send_bytes(data), timeout=1.0)
-        return True
-    except asyncio.TimeoutError:
-        pass
-    except Exception:
-        return False
-
-    # 发送超时：清空队列积压，取最新帧重试
-    latest = data
-    while not queue.empty():
-        try:
-            latest = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            break
-
-    try:
-        await asyncio.wait_for(ws.send_bytes(latest), timeout=1.0)
-        return True
-    except Exception:
-        return False
 
 
 async def _broadcast_h264(task_id: str, data: bytes):
