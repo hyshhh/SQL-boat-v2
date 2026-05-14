@@ -56,7 +56,7 @@ _h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, i
 
 # ── Pipeline 日志缓冲 ──
 _pipeline_logs: dict[str, list[dict]] = {}  # task_id → [{time, line}, ...]
-_MAX_LOG_LINES = 500  # 每个任务最大日志条数，超出后 FIFO 清理
+_MAX_LOG_LINES = 10  # 每个任务最大日志条数，超出后 FIFO 清理
 
 
 def _get_demo_config() -> dict:
@@ -759,12 +759,11 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 async with _state_lock:
                     _task_status[task_id]["progress"] = text
 
-            # 所有 stderr 日志推送到前端（识别结果优先解析，其余按级别归类）
-            logs = _pipeline_logs.get(task_id)
-            if logs is not None:
-                import time, re
-                if "Step1" in text and "Step3" in text:
-                    # 识别结果：解析 Track ID + 弦号 + 匹配类型
+            # 捕获识别日志（解析 Track ID + Step1/Step3，格式化为 [Track X] 弦号+匹配结果）
+            if "Step1" in text and "Step3" in text:
+                logs = _pipeline_logs.get(task_id)
+                if logs is not None:
+                    import time, re
                     m_track = re.search(r'\[Track\s+(\d+)\]', text)
                     track_id_str = m_track.group(1) if m_track else "?"
                     m_id = re.search(r'Step1\(VLM\):\s*弦号=(\S+)', text)
@@ -783,22 +782,9 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                         line = f"[Track {track_id_str}] 弦号：{hull}，未命中"
                         level = "miss"
                     logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level, "track": track_id_str})
-                else:
-                    # 普通日志：按关键字判定级别
-                    if "ERROR" in text or "错误" in text:
-                        level = "error"
-                    elif "WARNING" in text or "WARN" in text or "警告" in text:
-                        level = "warn"
-                    else:
-                        level = "info"
-                    # 去掉日志前缀时间戳和模块名，只保留正文
-                    m_body = re.search(r'(?:\d{2}:\d{2}:\d{2}\s+\S+\s+\S+:\s*)?(.*)', text)
-                    line_text = m_body.group(1) if m_body else text
-                    logs.append({"time": time.strftime("%H:%M:%S"), "line": line_text, "level": level})
-                # FIFO 清理：超过上限时删除最早的半数
-                max_logs = _MAX_LOG_LINES
-                if len(logs) > max_logs:
-                    del logs[:max_logs // 2]
+                    # FIFO 清理
+                    if len(logs) > _MAX_LOG_LINES:
+                        del logs[:len(logs) - _MAX_LOG_LINES]
 
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
@@ -922,22 +908,19 @@ async def stop_pipeline(task_id: str):
 
     import signal
 
-    # 第一步：SIGTERM 整个进程组
+    # 用户主动停止：先尝试 SIGTERM，短暂等待后直接 SIGKILL
     try:
         pgid = os.getpgid(process.pid)
         os.killpg(pgid, signal.SIGTERM)
-        logger.info("已发送 SIGTERM 到进程组 %d (task=%s)", pgid, task_id)
     except (ProcessLookupError, PermissionError):
         try:
             process.terminate()
         except ProcessLookupError:
             pass
 
-    # 第二步：等待 3 秒，如果还没退出就 SIGKILL
     try:
-        await asyncio.wait_for(process.wait(), timeout=3.0)
+        await asyncio.wait_for(process.wait(), timeout=1.0)
     except asyncio.TimeoutError:
-        logger.warning("SIGTERM 超时，强制 SIGKILL (task=%s)", task_id)
         try:
             pgid = os.getpgid(process.pid)
             os.killpg(pgid, signal.SIGKILL)
@@ -947,7 +930,7 @@ async def stop_pipeline(task_id: str):
             except ProcessLookupError:
                 pass
         try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
+            await asyncio.wait_for(process.wait(), timeout=1.0)
         except asyncio.TimeoutError:
             pass
 

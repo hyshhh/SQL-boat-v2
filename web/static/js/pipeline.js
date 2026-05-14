@@ -35,7 +35,6 @@ let currentTaskId = null;
 let statusPollTimer = null;
 let logPollTimer = null;
 let _logIndex = 0;           // 已拉取的日志索引
-let _logStaleTimer = null;  // 日志无新条目时的清空定时器
 let streamWs = null;        // WebSocket 推流连接
 let _h264Ws = null;          // H.264 WebSocket
 let _h264MediaSource = null; // MediaSource
@@ -552,10 +551,6 @@ function stopStatusPolling() {
     clearInterval(logPollTimer);
     logPollTimer = null;
   }
-  if (_logStaleTimer) {
-    clearTimeout(_logStaleTimer);
-    _logStaleTimer = null;
-  }
 }
 
 async function pollTaskStatus() {
@@ -621,36 +616,21 @@ async function pollPipelineLogs() {
     if (data.logs && data.logs.length > 0) {
       const box = document.getElementById('pipelineLogContent');
       if (!box) return;
-      const clearSec = parseInt(document.getElementById('optLogClearSec')?.value, 10) || 30;
-      const maxLines = parseInt(document.getElementById('optMaxLogLines')?.value, 10) || 500;
-      const levelColors = {
-        exact: '#4caf50', semantic: '#ff9800', miss: '#f44336',
-        info: '#90a4ae', warn: '#ffb74d', error: '#ef5350',
-      };
+      const maxLines = parseInt(document.getElementById('optMaxLogLines')?.value, 10) || 10;
+      const levelColors = { exact: '#4caf50', semantic: '#ff9800', miss: '#f44336' };
       for (const entry of data.logs) {
-        const level = entry.level || 'info';
-        const color = levelColors[level] || '#90a4ae';
+        const level = entry.level || 'miss';
+        const color = levelColors[level] || '#f44336';
         const div = document.createElement('div');
         div.className = 'log-entry';
         div.innerHTML = `<span class="log-time">${entry.time}</span><span style="color:${color}">${entry.line}</span>`;
         box.appendChild(div);
       }
-      // FIFO：超过最大行数时删除最旧的
       while (box.children.length > maxLines) {
         box.removeChild(box.firstChild);
       }
       _logIndex = data.total;
       box.scrollTop = box.scrollHeight;
-
-      // 重置"连续无新日志"清空定时器
-      if (clearSec > 0) {
-        if (_logStaleTimer) clearTimeout(_logStaleTimer);
-        _logStaleTimer = setTimeout(() => {
-          const b = document.getElementById('pipelineLogContent');
-          if (b) b.innerHTML = '';
-          _logStaleTimer = null;
-        }, clearSec * 1000);
-      }
     }
   } catch (e) {}
 }
