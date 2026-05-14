@@ -1115,7 +1115,15 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
 
 
 async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
-    """每观众独立发送任务：从队列取数据发送，慢观众自动丢帧"""
+    """每观众独立发送任务：从队列取数据发送，慢观众自动丢帧
+
+    背压策略：
+    - send_bytes 超时 (1s) 时不清空队列，只丢掉当前帧，继续取下一帧
+    - 连续超时 3 次说明客户端确实跟不上，断开连接
+    - 队列满时 _broadcast_h264 已自动丢旧帧
+    """
+    timeout_count = 0
+    MAX_CONSECUTIVE_TIMEOUTS = 3
     try:
         while True:
             try:
@@ -1136,16 +1144,27 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
                     break
                 continue
             try:
-                await asyncio.wait_for(ws.send_bytes(data), timeout=5.0)
+                await asyncio.wait_for(ws.send_bytes(data), timeout=1.0)
+                timeout_count = 0  # 发送成功，重置计数
             except asyncio.TimeoutError:
-                logger.debug("观众发送超时，断开: %s", task_id)
-                break
+                # TCP 缓冲区满，客户端跟不上 — 丢掉当前帧，取下一帧
+                timeout_count += 1
+                if timeout_count >= MAX_CONSECUTIVE_TIMEOUTS:
+                    logger.debug("观众连续 %d 次发送超时，断开: %s", timeout_count, task_id)
+                    break
+                # 清空队列中积压的旧帧，只保留最新帧
+                while not queue.empty():
+                    try:
+                        data = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                continue
             except Exception:
                 break
     except asyncio.CancelledError:
         pass
     except Exception:
-        pass  # 抑制 keepalive ping failed 等 websockets 库内部异常
+        pass  # 抑制 websockets 库内部异常
     finally:
         async with _state_lock:
             stream = _h264_streams.get(task_id)
@@ -1225,7 +1244,7 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
             return
         stream["viewers"].add(websocket)
         # 创建此观众的独立队列和发送任务
-        q: asyncio.Queue = asyncio.Queue(maxsize=30)
+        q: asyncio.Queue = asyncio.Queue(maxsize=10)
         stream["viewer_queues"][websocket] = q
         sender_task = asyncio.create_task(_viewer_sender(websocket, q, task_id))
         stream["viewer_tasks"][websocket] = sender_task
