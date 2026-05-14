@@ -268,11 +268,11 @@ async function startVideoPipeline() {
     const resultPlaceholder = document.getElementById('resultPlaceholder');
     if (resultPlaceholder) {
       resultPlaceholder.innerHTML = `
-        <video id="streamVideo" autoplay muted playsinline style="max-width:100%;border-radius:8px;background:#000;display:block"></video>
+        <video id="streamVideo" class="demo-video" autoplay muted playsinline></video>
         <div id="streamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px">连接中...</div>
       `;
-      resultPlaceholder.className = 'result-area';
-      resultPlaceholder.style.cssText = '';
+      resultPlaceholder.style.background = 'transparent';
+      resultPlaceholder.style.border = 'none';
     }
 
     connectStreamWs(currentTaskId);
@@ -537,7 +537,7 @@ async function pollTaskStatus() {
         const resultPlaceholder = document.getElementById('resultPlaceholder');
         if (resultPlaceholder) {
           resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
-          resultPlaceholder.className = 'result-area';
+          resultPlaceholder.className = 'video-placeholder';
           resultPlaceholder.style.cssText = '';
         }
         loadTaskHistory();
