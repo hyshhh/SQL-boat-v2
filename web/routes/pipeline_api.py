@@ -582,8 +582,8 @@ async def start_pipeline(req: PipelineStartRequest):
 
     # 并发控制：检查是否已达上限
     sem = _get_semaphore()
-    if sem.locked():
-        running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+    running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+    if running_count >= _MAX_PARALLEL_PIPELINES:
         raise HTTPException(
             status_code=429,
             detail=f"已有 {running_count} 个 Pipeline 在运行（上限 {_MAX_PARALLEL_PIPELINES}），请等待完成后再试",
@@ -758,11 +758,14 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 async with _state_lock:
                     _task_status[task_id]["progress"] = text
 
-            # 捕获识别日志（解析 Step1/Step3，格式化为 弦号+匹配结果）
+            # 捕获识别日志（解析 Track ID + Step1/Step3，格式化为 [Track X] 弦号+匹配结果）
             if "Step1" in text and "Step3" in text:
                 logs = _pipeline_logs.get(task_id)
                 if logs is not None:
                     import time, re
+                    # 提取 Track ID
+                    m_track = re.search(r'\[Track\s+(\d+)\]', text)
+                    track_id_str = m_track.group(1) if m_track else "?"
                     # 提取弦号
                     m_id = re.search(r'Step1\(VLM\):\s*弦号=(\S+)', text)
                     hull = m_id.group(1) if m_id else "?"
@@ -772,15 +775,15 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                     match_type = m_match.group(1) if m_match else "none"
                     candidates = m_cand.group(1) if m_cand else "[]"
                     if match_type == "exact":
-                        line = f"弦号：{hull}，精确匹配"
+                        line = f"[Track {track_id_str}] 弦号：{hull}，精确匹配"
                         level = "exact"
                     elif match_type == "semantic":
-                        line = f"弦号：{hull}，相似：{candidates}"
+                        line = f"[Track {track_id_str}] 弦号：{hull}，相似：{candidates}"
                         level = "semantic"
                     else:
-                        line = f"弦号：{hull}，未命中"
+                        line = f"[Track {track_id_str}] 弦号：{hull}，未命中"
                         level = "miss"
-                    logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level})
+                    logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level, "track": track_id_str})
                     if len(logs) > 200:
                         del logs[:100]
 
@@ -880,6 +883,27 @@ async def stop_pipeline(task_id: str):
         stop_file.write_text("stop")
     except Exception:
         pass
+
+    # 浏览器摄像头模式：注入 None 唤醒 pipeline 线程
+    if process.pid == -1:
+        fq = _frame_queues.get(task_id)
+        if fq:
+            try:
+                fq.put_nowait(None)
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            process.kill()
+        async with _state_lock:
+            _task_status[task_id]["status"] = "failed"
+            _task_status[task_id]["error"] = "用户手动停止"
+            _running_processes.pop(task_id, None)
+            _stop_signals.discard(task_id)
+        await _stop_h264_stream(task_id)
+        _cleanup_stream_dir(task_id)
+        return {"success": True, "message": f"已停止任务: {task_id}"}
 
     import signal
 
@@ -1515,8 +1539,8 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
     # 并发控制
     sem = _get_semaphore()
-    if sem.locked():
-        running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+    running_count = sum(1 for t in _task_status.values() if t["status"] == "running")
+    if running_count >= _MAX_PARALLEL_PIPELINES:
         raise HTTPException(
             status_code=429,
             detail=f"已有 {running_count} 个 Pipeline 在运行（上限 {_MAX_PARALLEL_PIPELINES}），请等待完成后再试",
@@ -1588,7 +1612,12 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 self.stdout = _PipeReader(pipe_fd)
                 self.stderr = _NullStderr()
                 self.returncode = None
+                self.pid = -1  # 标记非真实进程
+                self._finished = asyncio.Event()
+            async def wait(self):
+                await self._finished.wait()
             def kill(self):
+                self._finished.set()
                 try:
                     os.close(pipe_r)
                 except OSError:
@@ -1598,11 +1627,11 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         cam_fps = int(req.target_fps) if req.target_fps > 0 else 15
         # pipe 输出缩放
         if 0.1 <= req.pipe_scale < 1.0:
-            pipe_w = max(16, int(640 * req.pipe_scale))
-            pipe_h = max(16, int(480 * req.pipe_scale))
+            pipe_out_w = max(16, int(640 * req.pipe_scale))
+            pipe_out_h = max(16, int(480 * req.pipe_scale))
         else:
-            pipe_w, pipe_h = 640, 480
-        asyncio.create_task(_start_h264_reader(task_id, fake_proc, pipe_w, pipe_h, fps=cam_fps))
+            pipe_out_w, pipe_out_h = 640, 480
+        asyncio.create_task(_start_h264_reader(task_id, fake_proc, pipe_out_w, pipe_out_h, fps=cam_fps))
 
         # ── Pipeline 线程 ──
         pipe_cfg = dict(pipeline_cfg)
@@ -1622,7 +1651,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "stop_file": str(stream_dir / "__STOP__"),
         })
         if 0.1 <= req.pipe_scale < 1.0:
-            pipe_cfg["pipe_output_size"] = [pipe_w, pipe_h]
+            pipe_cfg["pipe_output_size"] = [pipe_out_w, pipe_out_h]
         if req.max_frames > 0:
             pipe_cfg["max_frames"] = req.max_frames
         if req.device:
@@ -1685,6 +1714,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                         pass
                 await _stop_h264_stream(task_id)
                 fake_proc.stderr.signal_done()
+                fake_proc._finished.set()
                 sem.release()
                 _cleanup_stream_dir(task_id)
 
@@ -1698,6 +1728,10 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
     except Exception as e:
         sem.release()
+        try:
+            fake_proc._finished.set()
+        except Exception:
+            pass
         os.close(pipe_r)
         os.close(pipe_w)
         _frame_queues.pop(task_id, None)
