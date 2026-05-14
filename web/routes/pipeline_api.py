@@ -124,13 +124,13 @@ class PipelineStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 摄像头推帧帧率
-    pipe_scale: float = 1.0  # pipe 输出缩放系数 (0.1-1.0)
+    pipe_scale: float = 0.7  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
     yolo_model: str = ""
     prompt_mode: str = "detailed"
-    enable_refresh: bool = False
+    enable_refresh: bool = True
     gap_num: int = 150
     max_concurrent: int = 4
 
@@ -145,13 +145,13 @@ class BrowserCameraStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 浏览器推帧帧率
-    pipe_scale: float = 1.0  # pipe 输出缩放系数 (0.1-1.0)
+    pipe_scale: float = 0.7  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
     yolo_model: str = ""
     prompt_mode: str = "detailed"
-    enable_refresh: bool = False
+    enable_refresh: bool = True
     gap_num: int = 150
     max_concurrent: int = 4
 

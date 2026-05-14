@@ -194,8 +194,8 @@
               <input type="number" id="optTargetFps" value="15" min="0" max="120" step="1" />
             </div>
             <div class="param-item">
-              <label>pipe 缩放 <span class="param-val" id="optPipeScaleVal">1.0</span></label>
-              <input type="range" id="optPipeScale" min="0.2" max="1.0" step="0.1" value="1.0"
+              <label>pipe 缩放 <span class="param-val" id="optPipeScaleVal">0.7</span></label>
+              <input type="range" id="optPipeScale" min="0.2" max="1.0" step="0.1" value="0.7"
                      oninput="document.getElementById('optPipeScaleVal').textContent=this.value" />
             </div>
           </div>
@@ -237,7 +237,7 @@
               </div>
               <div class="param-item param-checkbox">
                 <label class="checkbox-label">
-                  <input type="checkbox" id="optEnableRefresh" /> 定时刷新
+                  <input type="checkbox" id="optEnableRefresh" checked /> 定时刷新
                 </label>
               </div>
             </div>
@@ -392,8 +392,8 @@
               <input type="number" id="camCaptureFps" value="15" min="1" max="60" />
             </div>
             <div class="param-item">
-              <label>pipe 缩放 <span class="param-val" id="camPipeScaleVal">1.0</span></label>
-              <input type="range" id="camPipeScale" min="0.2" max="1.0" step="0.1" value="1.0"
+              <label>pipe 缩放 <span class="param-val" id="camPipeScaleVal">0.7</span></label>
+              <input type="range" id="camPipeScale" min="0.2" max="1.0" step="0.1" value="0.7"
                      oninput="document.getElementById('camPipeScaleVal').textContent=this.value" />
             </div>
           </div>
@@ -435,7 +435,7 @@
               </div>
               <div class="param-item param-checkbox">
                 <label class="checkbox-label">
-                  <input type="checkbox" id="camEnableRefresh" /> 定时刷新识别
+                  <input type="checkbox" id="camEnableRefresh" checked /> 定时刷新识别
                 </label>
               </div>
             </div>

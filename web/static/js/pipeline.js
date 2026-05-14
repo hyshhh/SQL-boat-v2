@@ -35,6 +35,7 @@ let currentTaskId = null;
 let statusPollTimer = null;
 let logPollTimer = null;
 let _logIndex = 0;           // 已拉取的日志索引
+let _logStaleTimer = null;  // 日志无新条目时的清空定时器
 let streamWs = null;        // WebSocket 推流连接
 let _h264Ws = null;          // H.264 WebSocket
 let _h264MediaSource = null; // MediaSource
@@ -210,7 +211,7 @@ function collectVideoParams() {
     process_every: parseInt(document.getElementById('optProcessEvery').value, 10),
     detect_every: parseInt(document.getElementById('optDetectEvery').value, 10),
     target_fps: parseFloat(document.getElementById('optTargetFps').value) || 0,
-    pipe_scale: parseFloat(document.getElementById('optPipeScale').value) || 1.0,
+    pipe_scale: parseFloat(document.getElementById('optPipeScale').value) || 0.7,
     max_frames: parseInt(document.getElementById('optMaxFrames').value, 10) || 0,
     device: document.getElementById('optDevice').value,
     yolo_model: document.getElementById('optYoloModel').value.trim(),
@@ -230,7 +231,7 @@ function collectCameraParams() {
     detect_every: parseInt(document.getElementById('camDetectEvery').value, 10),
     target_fps: parseFloat(document.getElementById('camTargetFps').value) || 0,
     capture_fps: parseInt(document.getElementById('camCaptureFps').value, 10) || 15,
-    pipe_scale: parseFloat(document.getElementById('camPipeScale')?.value) || 1.0,
+    pipe_scale: parseFloat(document.getElementById('camPipeScale')?.value) || 0.7,
     max_frames: parseInt(document.getElementById('camMaxFrames').value, 10) || 0,
     device: document.getElementById('camDevice').value,
     yolo_model: document.getElementById('camYoloModel').value.trim(),
@@ -551,6 +552,10 @@ function stopStatusPolling() {
     clearInterval(logPollTimer);
     logPollTimer = null;
   }
+  if (_logStaleTimer) {
+    clearTimeout(_logStaleTimer);
+    _logStaleTimer = null;
+  }
 }
 
 async function pollTaskStatus() {
@@ -629,9 +634,6 @@ async function pollPipelineLogs() {
         div.className = 'log-entry';
         div.innerHTML = `<span class="log-time">${entry.time}</span><span style="color:${color}">${entry.line}</span>`;
         box.appendChild(div);
-        if (clearSec > 0) {
-          setTimeout(() => { div.remove(); }, clearSec * 1000);
-        }
       }
       // FIFO：超过最大行数时删除最旧的
       while (box.children.length > maxLines) {
@@ -639,6 +641,16 @@ async function pollPipelineLogs() {
       }
       _logIndex = data.total;
       box.scrollTop = box.scrollHeight;
+
+      // 重置"连续无新日志"清空定时器
+      if (clearSec > 0) {
+        if (_logStaleTimer) clearTimeout(_logStaleTimer);
+        _logStaleTimer = setTimeout(() => {
+          const b = document.getElementById('pipelineLogContent');
+          if (b) b.innerHTML = '';
+          _logStaleTimer = null;
+        }, clearSec * 1000);
+      }
     }
   } catch (e) {}
 }
