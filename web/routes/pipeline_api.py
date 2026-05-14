@@ -758,12 +758,29 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 async with _state_lock:
                     _task_status[task_id]["progress"] = text
 
-            # 捕获识别日志（Step1/Step2/Step3）
-            if "Step1" in text or "Step2" in text or "Step3" in text:
+            # 捕获识别日志（解析 Step1/Step3，格式化为 弦号+匹配结果）
+            if "Step1" in text and "Step3" in text:
                 logs = _pipeline_logs.get(task_id)
                 if logs is not None:
-                    import time
-                    logs.append({"time": time.strftime("%H:%M:%S"), "line": text})
+                    import time, re
+                    # 提取弦号
+                    m_id = re.search(r'Step1\(VLM\):\s*弦号=(\S+)', text)
+                    hull = m_id.group(1) if m_id else "?"
+                    # 提取匹配类型和候选
+                    m_match = re.search(r'匹配=(\w+)', text)
+                    m_cand = re.search(r"语义候选=(\[.*?\])", text)
+                    match_type = m_match.group(1) if m_match else "none"
+                    candidates = m_cand.group(1) if m_cand else "[]"
+                    if match_type == "exact":
+                        line = f"弦号：{hull}，精确匹配"
+                        level = "exact"
+                    elif match_type == "semantic":
+                        line = f"弦号：{hull}，相似：{candidates}"
+                        level = "semantic"
+                    else:
+                        line = f"弦号：{hull}，未命中"
+                        level = "miss"
+                    logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level})
                     if len(logs) > 200:
                         del logs[:100]
 

@@ -611,16 +611,19 @@ async function pollPipelineLogs() {
     if (data.logs && data.logs.length > 0) {
       const box = document.getElementById('pipelineLogContent');
       if (!box) return;
+      // 自动清空超时（秒），0=不自动清空
+      const clearSec = parseInt(document.getElementById('optLogClearSec')?.value, 10) || 30;
       for (const entry of data.logs) {
-        const line = entry.line || '';
-        let cls = '';
-        if (line.includes('Step1')) cls = 'log-step1';
-        else if (line.includes('Step2')) cls = 'log-step2';
-        else if (line.includes('Step3')) cls = 'log-step3';
+        const level = entry.level || 'miss';
+        const color = level === 'exact' ? '#4caf50' : level === 'semantic' ? '#ff9800' : '#f44336';
         const div = document.createElement('div');
         div.className = 'log-entry';
-        div.innerHTML = `<span class="log-time">${entry.time}</span><span class="${cls}">${line}</span>`;
+        div.innerHTML = `<span class="log-time">${entry.time}</span><span style="color:${color}">${entry.line}</span>`;
         box.appendChild(div);
+        // 设置自动清空定时器
+        if (clearSec > 0) {
+          setTimeout(() => { div.remove(); }, clearSec * 1000);
+        }
       }
       _logIndex = data.total;
       box.scrollTop = box.scrollHeight;
