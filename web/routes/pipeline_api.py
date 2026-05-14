@@ -1027,23 +1027,32 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
                 pass
 
         async def feed_frames():
-            """从 pipeline stdout 读 raw 帧 → ffmpeg stdin"""
+            """从 pipeline stdout 读 raw 帧 → ffmpeg stdin
+
+            用 read() + 缓冲代替 readexactly()：readexactly 在进程被杀时
+            可能永远阻塞（Windows 管道不立即关闭），导致任务无法退出。
+            """
             nonlocal running
+            buf = bytearray()
             try:
                 while running:
-                    data = await process.stdout.readexactly(frame_size)
-                    if not data:
+                    chunk = await process.stdout.read(65536)
+                    if not chunk:
                         break
-                    if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
-                        ffmpeg_proc.stdin.write(data)
-                        await ffmpeg_proc.stdin.drain()
-                        # 更新已喂帧计数（供背压检测）
-                        async with _state_lock:
-                            stream = _h264_streams.get(task_id)
-                            if stream:
-                                stream["frames_fed"] += 1
-                    else:
-                        break
+                    buf.extend(chunk)
+                    while len(buf) >= frame_size:
+                        frame_data = bytes(buf[:frame_size])
+                        del buf[:frame_size]
+                        if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                            ffmpeg_proc.stdin.write(frame_data)
+                            await ffmpeg_proc.stdin.drain()
+                            async with _state_lock:
+                                stream = _h264_streams.get(task_id)
+                                if stream:
+                                    stream["frames_fed"] += 1
+                        else:
+                            running = False
+                            break
             except (asyncio.IncompleteReadError, BrokenPipeError, OSError):
                 pass
             finally:
@@ -2035,31 +2044,36 @@ async def _receive_h264_camera_frames(
             async def _read_stdout():
                 """从 ffmpeg stdout 读取解码后的 BGR 帧 → pipeline 队列"""
                 nonlocal frame_count
+                read_buf = bytearray()
                 try:
                     while True:
-                        data = await ffmpeg_proc.stdout.readexactly(frame_size)
-                        if not data:
+                        chunk = await ffmpeg_proc.stdout.read(65536)
+                        if not chunk:
                             break
+                        read_buf.extend(chunk)
+                        while len(read_buf) >= frame_size:
+                            frame_data = bytes(read_buf[:frame_size])
+                            del read_buf[:frame_size]
 
-                        frame = np.frombuffer(data, np.uint8).reshape(480, 640, 3).copy()
+                            frame = np.frombuffer(frame_data, np.uint8).reshape(480, 640, 3).copy()
 
-                        if use_queue:
-                            _queue_put_latest(frame_queue, frame)
-                        else:
-                            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                            if frames_dir:
-                                frame_path = frames_dir / "latest.jpg"
-                                tmp_path = frames_dir / "latest.jpg.tmp"
-                                tmp_path.write_bytes(buf.tobytes())
-                                tmp_path.rename(frame_path)
+                            if use_queue:
+                                _queue_put_latest(frame_queue, frame)
+                            else:
+                                _, jpg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                                if frames_dir:
+                                    frame_path = frames_dir / "latest.jpg"
+                                    tmp_path = frames_dir / "latest.jpg.tmp"
+                                    tmp_path.write_bytes(jpg_buf.tobytes())
+                                    tmp_path.rename(frame_path)
 
-                        frame_count += 1
-                        if frame_count % 30 == 0:
-                            logger.debug("H264 解码帧计数: %d", frame_count)
-                            try:
-                                await websocket.send_json({"ok": True, "frame": frame_count})
-                            except Exception:
-                                pass
+                            frame_count += 1
+                            if frame_count % 30 == 0:
+                                logger.debug("H264 解码帧计数: %d", frame_count)
+                                try:
+                                    await websocket.send_json({"ok": True, "frame": frame_count})
+                                except Exception:
+                                    pass
                 except asyncio.IncompleteReadError:
                     logger.debug("H264 stdout 结束 (IncompleteRead), 已解码 %d 帧", frame_count)
                 except OSError:
