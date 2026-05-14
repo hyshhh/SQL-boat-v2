@@ -388,13 +388,14 @@ class ShipPipeline:
     class _RawStdoutWriter:
         """后台线程：将原始 BGR 帧写入 stdout（供 ffmpeg H.264 编码）。自带背压。"""
 
-        def __init__(self, max_pending: int = 2):
+        def __init__(self, max_pending: int = 2, pipe_output_size: tuple[int, int] | None = None):
             self._queue: list = []
             self._lock = threading.Lock()
             self._stop = threading.Event()
             self._frame_count = 0
             self._drop_count = 0
             self._max_pending = max_pending  # 最大待写帧数，超过时阻塞主循环
+            self._pipe_output_size = pipe_output_size  # pipe 输出缩放尺寸，None 表示不缩放
             self._can_write = threading.Event()
             self._can_write.set()
             self._thread = threading.Thread(target=self._run, daemon=True)
@@ -402,6 +403,12 @@ class ShipPipeline:
 
         def write(self, frame: np.ndarray) -> None:
             """提交帧到写入队列。队列满时阻塞（背压），不丢帧。"""
+            # pipe 输出缩放（INTER_AREA 下采样，无编码开销）
+            if self._pipe_output_size:
+                ow, oh = self._pipe_output_size
+                fh, fw = frame.shape[:2]
+                if fw != ow or fh != oh:
+                    frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_AREA)
             # 等待队列有空间
             while not self._stop.is_set():
                 with self._lock:
@@ -605,8 +612,10 @@ class ShipPipeline:
         raw_stdout = self._config.get("pipeline", {}).get("raw_stdout", False)
 
         if raw_stdout:
-            raw_writer = ShipPipeline._RawStdoutWriter()
-            logger.info("Raw stdout 帧输出已启用（供 H.264 编码）")
+            _pos = self._config.get("pipeline", {}).get("pipe_output_size")
+            pipe_output_size = tuple(_pos) if _pos else None
+            raw_writer = ShipPipeline._RawStdoutWriter(pipe_output_size=pipe_output_size)
+            logger.info("Raw stdout 帧输出已启用（供 H.264 编码% s）", f", 缩放至 {pipe_output_size[0]}x{pipe_output_size[1]}" if pipe_output_size else "")
         elif stream_dir:
             stream_path = Path(stream_dir)
             stream_path.mkdir(parents=True, exist_ok=True)

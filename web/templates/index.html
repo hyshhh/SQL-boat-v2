@@ -180,6 +180,11 @@
               <label>目标帧率 (0=不限)</label>
               <input type="number" id="optTargetFps" value="15" min="0" max="120" step="1" />
             </div>
+            <div class="param-item">
+              <label>pipe 缩放 <span class="param-val" id="optPipeScaleVal">1.0</span></label>
+              <input type="range" id="optPipeScale" min="0.2" max="1.0" step="0.1" value="1.0"
+                     oninput="document.getElementById('optPipeScaleVal').textContent=this.value" />
+            </div>
           </div>
 
           <!-- 高级参数 (折叠) -->
@@ -372,6 +377,11 @@
             <div class="param-item">
               <label>推帧帧率 (fps)</label>
               <input type="number" id="camCaptureFps" value="15" min="1" max="60" />
+            </div>
+            <div class="param-item">
+              <label>pipe 缩放 <span class="param-val" id="camPipeScaleVal">1.0</span></label>
+              <input type="range" id="camPipeScale" min="0.2" max="1.0" step="0.1" value="1.0"
+                     oninput="document.getElementById('camPipeScaleVal').textContent=this.value" />
             </div>
           </div>
 

@@ -120,6 +120,7 @@ class PipelineStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 摄像头推帧帧率
+    pipe_scale: float = 1.0  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -140,6 +141,7 @@ class BrowserCameraStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 浏览器推帧帧率
+    pipe_scale: float = 1.0  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -651,6 +653,14 @@ async def start_pipeline(req: PipelineStartRequest):
         cmd.append("--enable-refresh")
         cmd.extend(["--gap-num", str(req.gap_num)])
 
+    # pipe 输出缩放
+    if 0.1 <= req.pipe_scale < 1.0:
+        cmd.extend(["--pipe-scale", str(req.pipe_scale)])
+        pipe_w = max(16, int(video_w * req.pipe_scale))
+        pipe_h = max(16, int(video_h * req.pipe_scale))
+    else:
+        pipe_w, pipe_h = video_w, video_h
+
     if is_camera:
         cmd.append("--camera")
         # 摄像头也走 raw stdout → H.264 推流（和视频文件一样）
@@ -697,7 +707,7 @@ async def start_pipeline(req: PipelineStartRequest):
 
         # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
         h264_fps = int(req.target_fps) if req.target_fps > 0 else 15
-        asyncio.create_task(_start_h264_reader(task_id, process, video_w, video_h, fps=h264_fps))
+        asyncio.create_task(_start_h264_reader(task_id, process, pipe_w, pipe_h, fps=h264_fps))
 
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
 
@@ -1547,7 +1557,13 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
 
         fake_proc = _FakeProcess(pipe_r)
         cam_fps = int(req.target_fps) if req.target_fps > 0 else 15
-        asyncio.create_task(_start_h264_reader(task_id, fake_proc, 640, 480, fps=cam_fps))
+        # pipe 输出缩放
+        if 0.1 <= req.pipe_scale < 1.0:
+            pipe_w = max(16, int(640 * req.pipe_scale))
+            pipe_h = max(16, int(480 * req.pipe_scale))
+        else:
+            pipe_w, pipe_h = 640, 480
+        asyncio.create_task(_start_h264_reader(task_id, fake_proc, pipe_w, pipe_h, fps=cam_fps))
 
         # ── Pipeline 线程 ──
         pipe_cfg = dict(pipeline_cfg)
@@ -1566,6 +1582,8 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "output_size": [640, 480],
             "stop_file": str(stream_dir / "__STOP__"),
         })
+        if 0.1 <= req.pipe_scale < 1.0:
+            pipe_cfg["pipe_output_size"] = [pipe_w, pipe_h]
         if req.max_frames > 0:
             pipe_cfg["max_frames"] = req.max_frames
         if req.device:
