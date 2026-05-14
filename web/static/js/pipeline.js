@@ -226,6 +226,7 @@ function collectCameraParams() {
     process_every: parseInt(document.getElementById('camProcessEvery').value, 10),
     detect_every: parseInt(document.getElementById('camDetectEvery').value, 10),
     target_fps: parseFloat(document.getElementById('camTargetFps').value) || 0,
+    capture_fps: parseInt(document.getElementById('camCaptureFps').value, 10) || 15,
     max_frames: parseInt(document.getElementById('camMaxFrames').value, 10) || 0,
     device: document.getElementById('camDevice').value,
     yolo_model: document.getElementById('camYoloModel').value.trim(),
@@ -660,6 +661,7 @@ let browserCameraStream = null;   // MediaStream
 let browserCameraWs = null;       // WebSocket
 let browserCameraTimer = null;    // 帧捕获定时器
 let browserCameraCanvas = null;   // 离屏 canvas
+let browserCameraCaptureFps = 15; // 推帧帧率
 
 function onCameraSourceChange() {
   const sel = document.getElementById('cameraSource');
@@ -743,6 +745,7 @@ async function startBrowserCamera() {
     if (!resp.ok) throw new Error(data.detail || '启动失败');
 
     cameraTaskId = data.task_id;
+    browserCameraCaptureFps = data.capture_fps || 15;
 
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
@@ -893,7 +896,7 @@ function startFrameCapture(ws, stream) {
 
   const OUT_W = 640;
   const OUT_H = 480;
-  const CAPTURE_INTERVAL = 66; // ~15fps
+  const CAPTURE_INTERVAL = Math.round(1000 / (browserCameraCaptureFps || 15));
   const JPEG_QUALITY = 0.7;
 
   const doCapture = () => {

@@ -119,6 +119,7 @@ class PipelineStartRequest(BaseModel):
     process_every: int = 15
     detect_every: int = 2
     target_fps: float = 0
+    capture_fps: int = 15  # 摄像头推帧帧率
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -138,6 +139,7 @@ class BrowserCameraStartRequest(BaseModel):
     process_every: int = 15
     detect_every: int = 2
     target_fps: float = 0
+    capture_fps: int = 15  # 浏览器推帧帧率
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -153,6 +155,7 @@ class PipelineStartResponse(BaseModel):
     message: str
     task_id: str | None = None
     output_filename: str | None = None
+    capture_fps: int | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -1644,6 +1647,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         success=True,
         message=f"浏览器摄像头 Pipeline 已启动 (内存队列模式)，请连接 WebSocket 推流",
         task_id=task_id,
+        capture_fps=req.capture_fps,
     )
 
 

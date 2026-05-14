@@ -62,6 +62,7 @@ class ShipPipeline:
         self._max_concurrent: int = pipe_cfg.get("max_concurrent") or 4
         self._max_queued_frames: int = pipe_cfg.get("max_queued_frames") or 30
         self._target_fps: float = float(pipe_cfg.get("target_fps", 0))  # 0=不限制
+        self._frame_skip_interval: int = 1  # 帧跳过间隔，>1 时跳帧减少计算量
         self._process_every_n: int = max(1, pipe_cfg.get("process_every_n_frames") or 1)
         self._detect_every_n: int = max(1, pipe_cfg.get("detect_every_n_frames") or 1)
         self._demo_enabled: bool = bool(pipe_cfg.get("demo", False))
@@ -590,6 +591,13 @@ class ShipPipeline:
                 self._target_fps = src_fps
                 logger.info("自动设置 target_fps = 源视频 FPS (%.1f)", src_fps)
 
+        # 帧跳过计算：target_fps < source_fps 时跳帧减少计算量
+        src_fps = input_src.source_fps
+        if self._target_fps > 0 and src_fps > self._target_fps:
+            self._frame_skip_interval = max(1, round(src_fps / self._target_fps))
+            logger.info("帧跳过: 源 %.1f fps → 目标 %.1f fps, 每 %d 帧取 1 帧",
+                        src_fps, self._target_fps, self._frame_skip_interval)
+
         # 帧输出：MJPEG 磁盘写入 + 可选 raw stdout
         frame_writer: ShipPipeline._FrameWriter | None = None
         raw_writer: ShipPipeline._RawStdoutWriter | None = None
@@ -642,6 +650,10 @@ class ShipPipeline:
                 frame_start_time = time.time()
                 if max_frames > 0 and frame_id > max_frames:
                     break
+
+                # 帧跳过：减少计算量，跳过的帧不执行检测/渲染/输出
+                if self._frame_skip_interval > 1 and (frame_id % self._frame_skip_interval != 1):
+                    continue
 
                 self._fps.tick("stream")
 
