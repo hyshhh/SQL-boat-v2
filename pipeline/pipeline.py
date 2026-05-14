@@ -581,6 +581,7 @@ class ShipPipeline:
         video_writer = None
         last_detections: list[Detection] = []
         frame_id = 0
+        processed_frame_id = 0  # 仅统计实际处理的帧（跳帧后独立计数）
         total_detections = 0
         start_time = time.time()
 
@@ -654,11 +655,12 @@ class ShipPipeline:
                 # 帧跳过：减少计算量，跳过的帧不执行检测/渲染/输出
                 if self._frame_skip_interval > 1 and (frame_id % self._frame_skip_interval != 1):
                     continue
+                processed_frame_id += 1
 
                 self._fps.tick("stream")
 
-                # YOLO 检测（主循环同步）
-                should_detect = (frame_id % self._detect_every_n == 0)
+                # YOLO 检测（主循环同步）— 用 processed_frame_id 避免跳帧后取模不匹配
+                should_detect = (processed_frame_id % self._detect_every_n == 0)
                 if should_detect:
                     try:
                         with self._latency.measure("yolo"):
@@ -676,7 +678,7 @@ class ShipPipeline:
                     self._tracker.get_or_create(det.track_id, frame_id)
 
                 # 推理：按间隔提交到 VLM worker 池（不阻塞主循环）
-                should_process = (frame_id % self._process_every_n == 0)
+                should_process = (processed_frame_id % self._process_every_n == 0)
                 if should_process:
                     if self._concurrent_mode:
                         self._concurrent_process(detections, frame_id)
