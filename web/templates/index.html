@@ -74,8 +74,8 @@
   <!-- Tab 2: 视频 Demo -->
   <!-- ═══════════════════════════════════════════ -->
   <div class="tab-content" id="tab-video-demo">
-    <div class="demo-layout" style="display:flex;gap:20px;align-items:flex-start">
-      <div class="demo-main" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:20px">
+    <div class="demo-layout">
+      <div class="demo-main">
 
         <!-- Pipeline 控制 + 播放（合并为一个卡片） -->
         <div class="section-card" id="pipelineControl" style="display:none">
@@ -93,9 +93,23 @@
             <span id="pipelineStatusText">等待开始</span>
           </div>
 
-          <!-- 视频播放区 -->
-          <div class="result-area">
-            <div id="resultPlaceholder" class="video-placeholder">
+          <!-- 视频对比区 -->
+          <div class="video-compare" id="videoCompare" style="display:none">
+            <div class="video-box">
+              <h4>源视频</h4>
+              <video id="sourceVideo" class="demo-video" controls muted></video>
+            </div>
+            <div class="video-box">
+              <h4>识别结果</h4>
+              <div id="resultPlaceholder" class="video-placeholder">
+                <span>🎬</span>
+                <p>点击"开始处理"后实时显示</p>
+              </div>
+            </div>
+          </div>
+          <!-- 未选视频时的占位 -->
+          <div class="result-area" id="videoResultArea">
+            <div class="video-placeholder">
               <span>🎬</span>
               <p>选择视频后点击"开始处理"</p>
             </div>
@@ -106,7 +120,10 @@
         <div class="section-card">
           <div class="section-header">
             <h3 class="section-title">📋 任务历史</h3>
-            <button class="btn btn-outline btn-sm" onclick="loadTaskHistory()">刷新</button>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-outline btn-sm" onclick="loadTaskHistory()">刷新</button>
+              <button class="btn btn-outline btn-sm" onclick="clearTaskHistory()">清空</button>
+            </div>
           </div>
           <div id="taskHistory" class="task-list">
             <div class="empty-msg">暂无任务</div>
@@ -115,7 +132,7 @@
       </div>
 
       <!-- ── 右栏：配置 + 视频列表 ── -->
-      <div class="demo-sidebar" style="width:340px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
+      <div class="demo-sidebar">
 
         <!-- 上传区 -->
         <div class="section-card">
@@ -231,8 +248,8 @@
   <!-- Tab 3: 摄像头 Demo（双栏布局） -->
   <!-- ═══════════════════════════════════════════ -->
   <div class="tab-content" id="tab-camera-demo">
-    <div class="demo-layout" style="display:flex;gap:20px;align-items:flex-start">
-      <div class="demo-main" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:20px">
+    <div class="demo-layout">
+      <div class="demo-main">
 
         <!-- Pipeline 控制 + 实时预览 -->
         <div class="section-card" id="cameraPipelineControl">
@@ -277,18 +294,24 @@
           <h3 class="section-title">💡 使用说明</h3>
           <div class="help-content">
             <ul>
-              <li><strong>本地摄像头</strong>：选择输入源为"本地摄像头"，确保设备有可用摄像头</li>
-              <li><strong>RTSP 流</strong>：选择"RTSP 流"后填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
+              <li><strong>浏览器摄像头（默认）</strong>：直接调用浏览器 <code>getUserMedia</code> API，需 HTTPS 或 localhost 环境。帧通过 WebSocket 推送到后端处理</li>
+              <li><strong>视频编码模式</strong>：
+                <ul>
+                  <li><strong>MJPEG</strong>：逐帧 JPEG 传输，兼容性好，延迟较低</li>
+                  <li><strong>WebRTC</strong>：浏览器直连服务器，超低延迟，推荐局域网使用</li>
+                </ul>
+              </li>
+              <li><strong>服务器摄像头</strong>：直接读取服务器连接的 USB 摄像头（设备号 0, 1, …）</li>
+              <li><strong>RTSP 流</strong>：填入地址，如 <code>rtsp://192.168.1.100/stream</code></li>
               <li><strong>自定义</strong>：支持视频文件路径或任意 OpenCV 支持的输入源</li>
               <li>处理结果将保存到 <code>demo_output</code> 目录</li>
-              <li>后端仍可通过 CLI 独立运行 pipeline</li>
             </ul>
           </div>
         </div>
       </div>
 
       <!-- ── 右栏：配置 ── -->
-      <div class="demo-sidebar" style="width:340px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
+      <div class="demo-sidebar">
 
         <!-- 输入源配置 -->
         <div class="section-card">
@@ -327,6 +350,9 @@
               <div class="param-hint" style="font-size:11px;color:#888;margin-top:4px">
                 WebRTC 浏览器直连服务器，延迟最低，无需 ffmpeg 中间转码
               </div>
+            </div>
+            <div class="param-hint" id="camStreamModeHint" style="font-size:11px;color:#888;display:none">
+              服务端摄像头/RTSP 自带 H.264 编码，无需选择编码模式
             </div>
           </div>
         </div>

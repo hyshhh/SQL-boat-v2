@@ -158,16 +158,33 @@ async function loadVideoList() {
 }
 
 function selectVideo(filename, el) {
+  // 如果有 pipeline 在运行，先提示用户
+  if (currentTaskId) {
+    if (!confirm('当前有 Pipeline 正在运行，切换视频将停止当前任务。是否继续？')) return;
+    stopVideoPipeline();
+  }
+
   selectedVideo = filename;
   document.getElementById('pipelineControl').style.display = '';
   // 更新选中状态
   document.querySelectorAll('.video-item').forEach(item => item.classList.remove('selected'));
   if (el) el.classList.add('selected');
 
+  // 加载源视频到对比区
+  const videoCompare = document.getElementById('videoCompare');
+  const videoResultArea = document.getElementById('videoResultArea');
+  const sourceVideo = document.getElementById('sourceVideo');
+  if (sourceVideo) {
+    sourceVideo.src = `${PIPE_API}/video/${encodeURIComponent(filename)}`;
+  }
+  // 隐藏旧的单栏占位，显示对比区（但结果侧先显示占位）
+  if (videoCompare) videoCompare.style.display = '';
+  if (videoResultArea) videoResultArea.style.display = 'none';
+
   // 重置结果区域
   const resultPlaceholder = document.getElementById('resultPlaceholder');
   if (resultPlaceholder) {
-    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示</p>';
     resultPlaceholder.style.display = '';
   }
   resetPipelineStatus();
@@ -183,6 +200,12 @@ async function deleteVideo(filename) {
     if (selectedVideo === filename) {
       selectedVideo = null;
       document.getElementById('pipelineControl').style.display = 'none';
+      const videoCompare = document.getElementById('videoCompare');
+      const videoResultArea = document.getElementById('videoResultArea');
+      if (videoCompare) videoCompare.style.display = 'none';
+      if (videoResultArea) videoResultArea.style.display = '';
+      const sourceVideo = document.getElementById('sourceVideo');
+      if (sourceVideo) sourceVideo.src = '';
     }
     loadVideoList();
   } catch (e) {
@@ -263,6 +286,11 @@ async function startVideoPipeline() {
         <div id="streamFps" style="text-align:center;font-size:12px;color:#888;margin-top:4px">连接中...</div>
       `;
       resultPlaceholder.style.display = '';
+      // 替换占位样式为正常显示
+      resultPlaceholder.className = '';
+      resultPlaceholder.style.background = '#000';
+      resultPlaceholder.style.border = 'none';
+      resultPlaceholder.style.minHeight = 'auto';
     }
 
     connectStreamWs(currentTaskId);
@@ -481,10 +509,7 @@ async function stopVideoPipeline() {
   }
 
   // 恢复结果占位
-  const resultPlaceholder = document.getElementById('resultPlaceholder');
-  if (resultPlaceholder) {
-    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
-  }
+  _restoreResultPlaceholder();
 
   loadTaskHistory();
 }
@@ -527,6 +552,10 @@ async function pollTaskStatus() {
         const resultPlaceholder = document.getElementById('resultPlaceholder');
         if (resultPlaceholder) {
           resultPlaceholder.innerHTML = '<span>✅</span><p>处理完成</p>';
+          resultPlaceholder.className = '';
+          resultPlaceholder.style.background = '#000';
+          resultPlaceholder.style.border = 'none';
+          resultPlaceholder.style.minHeight = 'auto';
         }
         loadTaskHistory();
         currentTaskId = null;
@@ -536,10 +565,7 @@ async function pollTaskStatus() {
         stopStatusPolling();
         resetPipelineButtons();
         disconnectStreamWs();
-        const resultPlaceholder = document.getElementById('resultPlaceholder');
-        if (resultPlaceholder) {
-          resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示识别结果</p>';
-        }
+        _restoreResultPlaceholder();
         const errorMsg = data.error || '未知错误';
         if (errorMsg === '用户手动停止') {
           showToast('已停止', 'info');
@@ -573,6 +599,19 @@ function resetPipelineButtons() {
   const stopBtn = document.getElementById('btnStopPipeline');
   if (startBtn) startBtn.style.display = '';
   if (stopBtn) stopBtn.style.display = 'none';
+}
+
+/** 恢复结果区域为初始占位状态 */
+function _restoreResultPlaceholder() {
+  const resultPlaceholder = document.getElementById('resultPlaceholder');
+  if (resultPlaceholder) {
+    resultPlaceholder.innerHTML = '<span>🎬</span><p>点击"开始处理"后实时显示</p>';
+    resultPlaceholder.className = 'video-placeholder';
+    resultPlaceholder.style.background = '';
+    resultPlaceholder.style.border = '';
+    resultPlaceholder.style.minHeight = '';
+    resultPlaceholder.style.display = '';
+  }
 }
 
 // ── 任务历史 ──
@@ -610,6 +649,18 @@ async function loadTaskHistory() {
   }
 }
 
+async function clearTaskHistory() {
+  try {
+    const resp = await fetch(`${PIPE_API}/tasks/clear`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '清空失败');
+    showToast(data.message || '已清空');
+    loadTaskHistory();
+  } catch (e) {
+    showToast('清空失败: ' + e.message, 'error');
+  }
+}
+
 async function stopTaskById(taskId) {
   try {
     await fetch(`${PIPE_API}/stop/${taskId}`, { method: 'POST' });
@@ -638,6 +689,7 @@ function onCameraSourceChange() {
   const urlInput = document.getElementById('cameraUrl');
   const previewRow = document.getElementById('browserCameraPreviewRow');
   const streamModeRow = document.getElementById('camStreamModeRow');
+  const streamModeHint = document.getElementById('camStreamModeHint');
 
   if (urlInput) {
     urlInput.style.display = (val === '0' || val === 'browser') ? 'none' : '';
@@ -652,10 +704,10 @@ function onCameraSourceChange() {
     previewRow.style.display = val === 'browser' ? '' : 'none';
   }
 
-  // H264/MJPEG 切换仅对浏览器摄像头可见
-  if (streamModeRow) {
-    streamModeRow.style.display = val === 'browser' ? '' : 'none';
-  }
+  // H264/MJPEG 切换仅对浏览器摄像头可见；非浏览器时显示提示
+  const isBrowser = val === 'browser';
+  if (streamModeRow) streamModeRow.style.display = isBrowser ? '' : 'none';
+  if (streamModeHint) streamModeHint.style.display = isBrowser ? 'none' : '';
 }
 
 function getCameraInput() {
