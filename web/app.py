@@ -45,41 +45,39 @@ async def lifespan(app: FastAPI):
     logging.getLogger(__name__).info("Web 服务关闭")
 
 
-class _NoKeepaliveMiddleware:
-    """ASGI 中间件：禁用 websockets 库内置 keepalive
-
-    websockets 后台 keepalive 任务在 TCP 缓冲区满时会抛出 AssertionError
-    并杀死连接。该中间件在 WebSocket scope 中设置 ping_interval=None，
-    无论 uvicorn 以何种方式启动（命令行 / python -m）都能生效。
-    """
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") == "websocket":
-            scope["ping_interval"] = None
-            scope["ping_timeout"] = None
-        await self.app(scope, receive, send)
-
-
-app = FastAPI(
+_fast_app = FastAPI(
     title="船只舷号管理系统",
     description="通过 Web 界面管理船只舷号数据，支持 CSV 和 SQLite 后端",
     version="2.0.0",
     lifespan=lifespan,
 )
-# 禁用 websockets 库内置 keepalive（防止推流时 TCP 缓冲满导致连接崩溃）
-app = _NoKeepaliveMiddleware(app)
 
 # ── 静态文件 ──
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+    _fast_app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 # ── 注册路由 ──
-app.include_router(pages_router)
-app.include_router(api_router)
-app.include_router(pipeline_router)
+_fast_app.include_router(pages_router)
+_fast_app.include_router(api_router)
+_fast_app.include_router(pipeline_router)
+
+
+# ── ASGI 包装：禁用 websockets 库内置 keepalive ──
+# websockets 后台 keepalive 任务在 TCP 缓冲区满时会抛出 AssertionError 并杀死连接。
+# 在 WebSocket scope 中设置 ping_interval=None，无论 uvicorn 以何种方式启动都能生效。
+class _NoKeepaliveMiddleware:
+    def __init__(self, asgi_app):
+        self._app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "websocket":
+            scope["ping_interval"] = None
+            scope["ping_timeout"] = None
+        await self._app(scope, receive, send)
+
+
+app = _NoKeepaliveMiddleware(_fast_app)
 
 
 # ── 启动入口 ──
@@ -95,7 +93,7 @@ def main():
         host=host,
         port=port,
         log_level="info",
-        ws_ping_interval=None,  # 禁用 websockets 库自带 keepalive（已有应用层心跳）
+        ws_ping_interval=None,
     )
 
 
