@@ -1029,30 +1029,22 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         async def feed_frames():
             """从 pipeline stdout 读 raw 帧 → ffmpeg stdin
 
-            用 read() + 缓冲代替 readexactly()：readexactly 在进程被杀时
-            可能永远阻塞（Windows 管道不立即关闭），导致任务无法退出。
+            readexactly 一次读完整帧（2.7MB@640x480），避免多次 read 拼接
+            带来的异步调度延迟。进程被杀时 IncompleteReadError 由 except 捕获。
             """
             nonlocal running
-            buf = bytearray()
             try:
                 while running:
-                    chunk = await process.stdout.read(65536)
-                    if not chunk:
+                    data = await process.stdout.readexactly(frame_size)
+                    if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
+                        ffmpeg_proc.stdin.write(data)
+                        await ffmpeg_proc.stdin.drain()
+                        async with _state_lock:
+                            stream = _h264_streams.get(task_id)
+                            if stream:
+                                stream["frames_fed"] += 1
+                    else:
                         break
-                    buf.extend(chunk)
-                    while len(buf) >= frame_size:
-                        frame_data = bytes(buf[:frame_size])
-                        del buf[:frame_size]
-                        if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
-                            ffmpeg_proc.stdin.write(frame_data)
-                            await ffmpeg_proc.stdin.drain()
-                            async with _state_lock:
-                                stream = _h264_streams.get(task_id)
-                                if stream:
-                                    stream["frames_fed"] += 1
-                        else:
-                            running = False
-                            break
             except (asyncio.IncompleteReadError, BrokenPipeError, OSError):
                 pass
             finally:

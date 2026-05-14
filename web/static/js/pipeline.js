@@ -298,6 +298,7 @@ function connectStreamWs(taskId) {
   // MediaSource
   const ms = new MediaSource();
   videoEl.src = URL.createObjectURL(ms);
+  videoEl.load();  // 强制加载，确保 sourceopen 触发
   _h264MediaSource = ms;
   _h264SourceBuffer = null;
   _h264Queue = [];
@@ -311,6 +312,18 @@ function connectStreamWs(taskId) {
 
     let frameCount = 0;
     let fpsTimer = performance.now();
+
+    /** 尝试播放（autoplay 可能被浏览器策略阻止） */
+    function _ensurePlay() {
+      const vEl = document.getElementById('streamVideo');
+      if (vEl && vEl.paused) {
+        vEl.play().catch(() => {
+          // autoplay 被阻止，用户点击视频区域可手动播放
+          vEl.muted = true;
+          vEl.play().catch(() => {});
+        });
+      }
+    }
 
     /** 处理队列积压 + 清理已播放缓冲区 */
     function _processQueue() {
@@ -372,8 +385,12 @@ function connectStreamWs(taskId) {
             sb.addEventListener('updateend', () => {
               _processQueue();
             });
+            sb.addEventListener('error', (e) => {
+              console.error('SourceBuffer 错误:', e);
+            });
 
             sb.appendBuffer(payload);
+            _ensurePlay();  // init segment 就绪后尝试播放
           } catch (e) {
             console.error('MSE SourceBuffer 创建失败:', e);
           }
@@ -392,6 +409,7 @@ function connectStreamWs(taskId) {
           } else {
             try {
               sb.appendBuffer(payload);
+              if (frameCount === 0) _ensurePlay();  // 首帧到达后尝试播放
             } catch (e) {
               if (e.name === 'QuotaExceededError') {
                 // 缓冲区满，尝试清理后把当前帧和队列一起重试
@@ -1143,6 +1161,7 @@ function connectCameraH264(taskId) {
 
   const ms = new MediaSource();
   videoEl.src = URL.createObjectURL(ms);
+  videoEl.load();  // 强制加载，确保 sourceopen 触发
   _camH264MediaSource = ms;
   _camH264SourceBuffer = null;
   _camH264Queue = [];
