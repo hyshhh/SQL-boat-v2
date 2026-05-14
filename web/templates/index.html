@@ -107,6 +107,7 @@
               <span>识别日志</span>
               <div style="display:flex;gap:8px;align-items:center">
                 <label style="font-size:12px;color:#888;white-space:nowrap">自动清空 <input type="number" id="optLogClearSec" value="30" min="0" max="300" style="width:50px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:12px" />s</label>
+                <label style="font-size:12px;color:#888;white-space:nowrap">最大日志 <input type="number" id="optMaxLogLines" value="500" min="50" max="5000" step="50" style="width:60px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:12px" /></label>
                 <button class="btn btn-outline btn-sm" onclick="document.getElementById('pipelineLogContent').innerHTML=''">清空</button>
               </div>
             </div>

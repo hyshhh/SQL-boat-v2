@@ -499,6 +499,11 @@ async function stopVideoPipeline() {
   // 立即停止轮询，防止后续 pollTaskStatus 干扰新任务
   stopStatusPolling();
   currentTaskId = null;
+  _logIndex = 0;
+
+  // 清空识别日志
+  const logContent = document.getElementById('pipelineLogContent');
+  if (logContent) logContent.innerHTML = '';
 
   // 断开 WebSocket 推流
   disconnectStreamWs();
@@ -611,19 +616,26 @@ async function pollPipelineLogs() {
     if (data.logs && data.logs.length > 0) {
       const box = document.getElementById('pipelineLogContent');
       if (!box) return;
-      // 自动清空超时（秒），0=不自动清空
       const clearSec = parseInt(document.getElementById('optLogClearSec')?.value, 10) || 30;
+      const maxLines = parseInt(document.getElementById('optMaxLogLines')?.value, 10) || 500;
+      const levelColors = {
+        exact: '#4caf50', semantic: '#ff9800', miss: '#f44336',
+        info: '#90a4ae', warn: '#ffb74d', error: '#ef5350',
+      };
       for (const entry of data.logs) {
-        const level = entry.level || 'miss';
-        const color = level === 'exact' ? '#4caf50' : level === 'semantic' ? '#ff9800' : '#f44336';
+        const level = entry.level || 'info';
+        const color = levelColors[level] || '#90a4ae';
         const div = document.createElement('div');
         div.className = 'log-entry';
         div.innerHTML = `<span class="log-time">${entry.time}</span><span style="color:${color}">${entry.line}</span>`;
         box.appendChild(div);
-        // 设置自动清空定时器
         if (clearSec > 0) {
           setTimeout(() => { div.remove(); }, clearSec * 1000);
         }
+      }
+      // FIFO：超过最大行数时删除最旧的
+      while (box.children.length > maxLines) {
+        box.removeChild(box.firstChild);
       }
       _logIndex = data.total;
       box.scrollTop = box.scrollHeight;

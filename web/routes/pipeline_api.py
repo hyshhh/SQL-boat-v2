@@ -56,6 +56,7 @@ _h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, i
 
 # ── Pipeline 日志缓冲 ──
 _pipeline_logs: dict[str, list[dict]] = {}  # task_id → [{time, line}, ...]
+_MAX_LOG_LINES = 500  # 每个任务最大日志条数，超出后 FIFO 清理
 
 
 def _get_demo_config() -> dict:
@@ -758,18 +759,16 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                 async with _state_lock:
                     _task_status[task_id]["progress"] = text
 
-            # 捕获识别日志（解析 Track ID + Step1/Step3，格式化为 [Track X] 弦号+匹配结果）
-            if "Step1" in text and "Step3" in text:
-                logs = _pipeline_logs.get(task_id)
-                if logs is not None:
-                    import time, re
-                    # 提取 Track ID
+            # 所有 stderr 日志推送到前端（识别结果优先解析，其余按级别归类）
+            logs = _pipeline_logs.get(task_id)
+            if logs is not None:
+                import time, re
+                if "Step1" in text and "Step3" in text:
+                    # 识别结果：解析 Track ID + 弦号 + 匹配类型
                     m_track = re.search(r'\[Track\s+(\d+)\]', text)
                     track_id_str = m_track.group(1) if m_track else "?"
-                    # 提取弦号
                     m_id = re.search(r'Step1\(VLM\):\s*弦号=(\S+)', text)
                     hull = m_id.group(1) if m_id else "?"
-                    # 提取匹配类型和候选
                     m_match = re.search(r'匹配=(\w+)', text)
                     m_cand = re.search(r"语义候选=(\[.*?\])", text)
                     match_type = m_match.group(1) if m_match else "none"
@@ -784,8 +783,22 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                         line = f"[Track {track_id_str}] 弦号：{hull}，未命中"
                         level = "miss"
                     logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level, "track": track_id_str})
-                    if len(logs) > 200:
-                        del logs[:100]
+                else:
+                    # 普通日志：按关键字判定级别
+                    if "ERROR" in text or "错误" in text:
+                        level = "error"
+                    elif "WARNING" in text or "WARN" in text or "警告" in text:
+                        level = "warn"
+                    else:
+                        level = "info"
+                    # 去掉日志前缀时间戳和模块名，只保留正文
+                    m_body = re.search(r'(?:\d{2}:\d{2}:\d{2}\s+\S+\s+\S+:\s*)?(.*)', text)
+                    line_text = m_body.group(1) if m_body else text
+                    logs.append({"time": time.strftime("%H:%M:%S"), "line": line_text, "level": level})
+                # FIFO 清理：超过上限时删除最早的半数
+                max_logs = _MAX_LOG_LINES
+                if len(logs) > max_logs:
+                    del logs[:max_logs // 2]
 
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
@@ -822,6 +835,7 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
             _running_processes.pop(task_id, None)
             _stop_signals.discard(task_id)
             is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
+        _pipeline_logs.pop(task_id, None)
         if not is_browser_cam:
             _cleanup_stream_dir(task_id)
         _cleanup_old_tasks()
@@ -902,6 +916,7 @@ async def stop_pipeline(task_id: str):
             _running_processes.pop(task_id, None)
             _stop_signals.discard(task_id)
         await _stop_h264_stream(task_id)
+        _pipeline_logs.pop(task_id, None)
         _cleanup_stream_dir(task_id)
         return {"success": True, "message": f"已停止任务: {task_id}"}
 
@@ -943,7 +958,8 @@ async def stop_pipeline(task_id: str):
         _running_processes.pop(task_id, None)
         _stop_signals.discard(task_id)
 
-    # 清理帧目录和停止信号文件
+    # 清理日志缓冲和帧目录
+    _pipeline_logs.pop(task_id, None)
     _cleanup_stream_dir(task_id)
 
     return {"success": True, "message": f"已停止任务: {task_id}"}
@@ -992,6 +1008,7 @@ async def _delayed_cleanup(task_id: str, delay: int = 10):
             _task_status[task_id]["status"] = "completed"
             _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
         _stop_signals.discard(task_id)
+    _pipeline_logs.pop(task_id, None)
     _cleanup_stream_dir(task_id)
 
 
@@ -1574,6 +1591,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "is_browser_camera": True,
             "stream_mode": req.stream_mode,
         }
+    _pipeline_logs[task_id] = []
 
     try:
         await sem.acquire()
@@ -1716,6 +1734,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 fake_proc.stderr.signal_done()
                 fake_proc._finished.set()
                 sem.release()
+                _pipeline_logs.pop(task_id, None)
                 _cleanup_stream_dir(task_id)
 
             asyncio.run_coroutine_threadsafe(_finish(), _main_loop)
