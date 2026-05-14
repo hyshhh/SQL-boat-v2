@@ -1253,13 +1253,10 @@ async def ws_h264_stream(websocket: WebSocket, task_id: str):
                     break
             await asyncio.sleep(1)
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, AssertionError):
         pass
     except Exception as e:
-        # 抑制 keepalive ping failed 等 websockets 库内部异常
-        err_name = type(e).__name__
-        if "AssertionError" not in err_name and "keepalive" not in str(e).lower():
-            logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
+        logger.debug("H.264 WebSocket 异常 [%s]: %s", task_id, e)
     finally:
         # 清理：取消发送任务，移除队列
         st = None
@@ -1348,12 +1345,10 @@ async def ws_stream(websocket: WebSocket, task_id: str):
             sleep_time = max(0.005, target_interval - elapsed)
             await asyncio.sleep(sleep_time)
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, AssertionError):
         pass
     except Exception as e:
-        # 抑制 websockets 库的 drain/ping 断言错误（客户端异常断开时触发）
-        if "AssertionError" not in str(type(e).__name__):
-            logger.debug("WebSocket 推流异常 [%s]: %s", task_id, e)
+        logger.debug("WebSocket 推流异常 [%s]: %s", task_id, e)
     finally:
         # 注销观众
         async with _state_lock:
@@ -1750,9 +1745,10 @@ async def _receive_mjpeg_camera_frames(
 
     except WebSocketDisconnect:
         logger.info("MJPEG WebSocket 断开: %s (共 %d 帧)", task_id, frame_count)
+    except AssertionError:
+        pass
     except Exception as e:
-        if "AssertionError" not in str(type(e).__name__):
-            logger.error("MJPEG WebSocket 异常: %s", e)
+        logger.error("MJPEG WebSocket 异常: %s", e)
     finally:
         if use_queue and frame_queue:
             try:
