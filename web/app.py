@@ -76,7 +76,7 @@ def main():
         host=host,
         port=port,
         log_level="info",
-        ws_ping_interval=None,  # 禁用 websockets 库内置 keepalive（防止推流 TCP 缓冲满时连接崩溃）
+        ws_ping_interval=0,  # 禁用 websockets 库内置 keepalive（防止推流 TCP 缓冲满时连接崩溃）
     )
 
 
