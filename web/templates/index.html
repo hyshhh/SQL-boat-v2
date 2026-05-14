@@ -93,23 +93,9 @@
             <span id="pipelineStatusText">等待开始</span>
           </div>
 
-          <!-- 视频对比区 -->
-          <div class="video-compare" id="videoCompare" style="display:none">
-            <div class="video-box">
-              <h4>源视频</h4>
-              <video id="sourceVideo" class="demo-video" controls muted></video>
-            </div>
-            <div class="video-box">
-              <h4>识别结果</h4>
-              <div id="resultPlaceholder" class="video-placeholder">
-                <span>🎬</span>
-                <p>点击"开始处理"后实时显示</p>
-              </div>
-            </div>
-          </div>
-          <!-- 未选视频时的占位 -->
-          <div class="result-area" id="videoResultArea">
-            <div class="video-placeholder">
+          <!-- 视频播放区 -->
+          <div class="result-area">
+            <div id="resultPlaceholder" class="video-placeholder">
               <span>🎬</span>
               <p>选择视频后点击"开始处理"</p>
             </div>

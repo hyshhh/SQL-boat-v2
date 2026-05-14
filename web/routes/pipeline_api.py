@@ -659,6 +659,8 @@ async def start_pipeline(req: PipelineStartRequest):
     else:
         # 文件模式：raw stdout 输出（H.264 编码用），不写磁盘
         cmd.append("--raw-stdout")
+        # 统一输出尺寸，确保 ffmpeg 读取的帧大小与 pipeline 输出一致
+        cmd.extend(["--output-size", f"{video_w}x{video_h}"])
         if req.display:
             cmd.append("--display")
     cmd.append("--demo")
