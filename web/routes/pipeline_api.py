@@ -1039,8 +1039,8 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         async def feed_frames():
             """从 pipeline stdout 读 raw 帧 → ffmpeg stdin
 
-            readexactly 一次读完整帧（2.7MB@640x480），避免多次 read 拼接
-            带来的异步调度延迟。进程被杀时 IncompleteReadError 由 except 捕获。
+            drain() 丢线程池避免阻塞事件循环（ffmpeg 编码慢时 pipe buffer 满，
+            drain 阻塞会导致 WebSocket keepalive 超时 → 前端定格）。
             """
             nonlocal running
             try:
@@ -1048,7 +1048,8 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
                     data = await process.stdout.readexactly(frame_size)
                     if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
                         ffmpeg_proc.stdin.write(data)
-                        await ffmpeg_proc.stdin.drain()
+                        # drain 可能阻塞数秒（ffmpeg 编码慢），放到线程池不卡事件循环
+                        await loop.run_in_executor(None, ffmpeg_proc.stdin.drain)
                         async with _state_lock:
                             stream = _h264_streams.get(task_id)
                             if stream:
