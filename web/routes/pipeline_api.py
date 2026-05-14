@@ -1118,8 +1118,8 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
     """每观众独立发送任务：从队列取数据发送，慢观众自动丢帧
 
     不对 send_bytes 使用 asyncio.wait_for 超时（会 cancel 协程并破坏
-    websockets 连接状态）。TCP 缓冲满时 send_bytes 自然阻塞实现背压，
-    队列满时 _broadcast_h264 自动丢旧帧。keepalive 已禁用，不会崩溃。
+    websockets 连接状态）。TCP 缓冲满时 send_bytes 自然阻塞实现背压。
+    每次发送前先清空队列只取最新帧，避免发送积压旧数据。
     """
     try:
         while True:
@@ -1140,6 +1140,14 @@ async def _viewer_sender(ws: WebSocket, queue: asyncio.Queue, task_id: str):
                 except Exception:
                     break
                 continue
+
+            # 清空队列积压，只取最新帧
+            while not queue.empty():
+                try:
+                    data = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
             # 直接发送，不使用 wait_for 超时
             # TCP 缓冲满时自然阻塞（背压），队列满时 _broadcast_h264 自动丢旧帧
             await ws.send_bytes(data)

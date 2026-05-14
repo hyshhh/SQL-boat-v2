@@ -361,6 +361,10 @@ function connectStreamWs(taskId) {
             return;
           }
           try {
+            if (ms.readyState !== 'open') {
+              console.warn('MediaSource 未就绪，忽略 init segment');
+              return;
+            }
             const codecs = 'avc1.42C01F'; // H.264 Constrained Baseline Level 3.1
             const sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
             _h264SourceBuffer = sb;
@@ -430,7 +434,7 @@ function connectStreamWs(taskId) {
       if (currentTaskId === taskId) {
         _scheduleReconnect('h264-stream', () => {
           if (currentTaskId === taskId) connectStreamWs(taskId);
-        });
+        }, taskId);
       }
     };
 
@@ -799,7 +803,7 @@ function setupMjpegCameraWs(wsUrl, stream) {
           const newWs = new WebSocket(wsUrl);
           browserCameraWs = newWs;
           setupWsHandlers(newWs);
-        });
+        }, cameraTaskId);
       }
     };
   }
@@ -1189,6 +1193,10 @@ function connectCameraH264(taskId) {
             return;
           }
           try {
+            if (ms.readyState !== 'open') {
+              console.warn('摄像头 MediaSource 未就绪，忽略 init segment');
+              return;
+            }
             const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42C01F"');
             _camH264SourceBuffer = sb;
             sb.addEventListener('updateend', () => { _processCamQueue(); });
@@ -1238,7 +1246,7 @@ function connectCameraH264(taskId) {
       if (cameraTaskId === taskId) {
         _scheduleReconnect('h264-cam', () => {
           if (cameraTaskId === taskId) connectCameraH264(taskId);
-        });
+        }, taskId);
       }
     };
     ws.onerror = () => {};
@@ -1260,17 +1268,42 @@ function disconnectCameraH264() {
   if (fpsEl) fpsEl.textContent = '';
 }
 
-// ── WebSocket 自动重连（指数退避）──
-const _reconnectStates = new Map(); // key → {delay, timer}
+// ── WebSocket 自动重连（指数退避 + 状态检查 + 最大重试）──
+const _reconnectStates = new Map(); // key → {delay, timer, retries}
+const MAX_RECONNECT_RETRIES = 5;
 
-function _scheduleReconnect(key, connectFn) {
+async function _checkTaskRunning(taskId) {
+  try {
+    const resp = await fetch(`${PIPE_API}/status/${taskId}`);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return data.status === 'running';
+  } catch { return false; }
+}
+
+function _scheduleReconnect(key, connectFn, taskId) {
   let state = _reconnectStates.get(key);
   if (!state) {
-    state = { delay: 1000, timer: null };
+    state = { delay: 1000, timer: null, retries: 0 };
     _reconnectStates.set(key, state);
   }
   if (state.timer) clearTimeout(state.timer);
-  state.timer = setTimeout(() => {
+
+  if (state.retries >= MAX_RECONNECT_RETRIES) {
+    _reconnectStates.delete(key);
+    return;
+  }
+  state.retries++;
+
+  state.timer = setTimeout(async () => {
+    // 重连前检查任务是否还在运行
+    if (taskId) {
+      const running = await _checkTaskRunning(taskId);
+      if (!running) {
+        _reconnectStates.delete(key);
+        return;
+      }
+    }
     _reconnectStates.delete(key);
     connectFn();
   }, state.delay);
