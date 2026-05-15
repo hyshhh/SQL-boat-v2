@@ -100,7 +100,7 @@ def _create_source(config: dict[str, Any], db_path: str | None = None):
     from .sql_source import SqlShipSource
 
     db_cfg = config.get("database", {})
-    backend = db_cfg.get("backend", "csv")
+    backend = db_cfg.get("backend", "sqlite")
     if backend == "sqlite":
         sql_path = db_path or db_cfg.get("sqlite_path", "./data/ships.db")
         return SqlShipSource(sql_path)
