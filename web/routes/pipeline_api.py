@@ -2066,19 +2066,15 @@ async def _receive_h264_camera_frames(
     import cv2
     import numpy as np
 
-    # 根据 codec 选择 ffmpeg 输入格式
-    codec_lower = codec.lower()
-    if "h264" in codec_lower or "avc" in codec_lower:
-        ffmpeg_input_args = ["-f", "mp4"]
-    else:
-        ffmpeg_input_args = []  # 让 ffmpeg 自动探测
-
+    # MediaRecorder 即使指定 video/mp4，大多数浏览器实际输出 WebM 容器
+    # 所以不强制指定输入格式，让 ffmpeg 自动探测（同时增加 probesize 加速识别）
     ffmpeg_bin = _find_binary("ffmpeg") or "ffmpeg"
     ffmpeg_cmd = [
-        ffmpeg_bin, "-hide_banner", "-loglevel", "info",  # info 级别以便排查错误
+        ffmpeg_bin, "-hide_banner", "-loglevel", "info",
         "-fflags", "+nobuffer+discardcorrupt",
         "-flags", "+low_delay",
-        *ffmpeg_input_args,
+        "-probesize", "32768",        # 32KB 探测，加速格式识别
+        "-analyzeduration", "500000",  # 500ms 分析时间
         "-i", "pipe:0",
         "-vf", "scale=640:480",  # 强制输出目标分辨率
         "-f", "rawvideo",
