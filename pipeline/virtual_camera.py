@@ -43,6 +43,7 @@ class VirtualCamera:
         self._first_frame_received = False
         self._startup_timeout: float = 15.0     # 等待第一帧的最大超时（秒）
         self._queue = frame_queue               # 内存队列模式（零磁盘 I/O）
+        self._queue_startup_deadline: float = 0.0  # 队列模式首帧等待截止时间
 
     def isOpened(self) -> bool:
         return self._opened
@@ -54,6 +55,30 @@ class VirtualCamera:
 
         # ── 内存队列模式（零磁盘 I/O）──
         if self._queue is not None:
+            # 启动阶段：等待首帧到达（H264 解码器需要初始化时间）
+            if not self._first_frame_received:
+                if self._queue_startup_deadline == 0.0:
+                    self._queue_startup_deadline = time.time() + self._startup_timeout
+                    logger.info("等待首帧（队列模式，超时 %.0f 秒）...", self._startup_timeout)
+                while time.time() < self._queue_startup_deadline:
+                    try:
+                        frame = self._queue.get(timeout=0.1)
+                        if frame is None:
+                            self._opened = False
+                            return False, None
+                        self._first_frame_received = True
+                        self._last_frame = frame
+                        self._frame_count += 1
+                        if self._width == 0:
+                            self._height, self._width = frame.shape[:2]
+                        logger.info("首帧已收到（队列模式）: %dx%d", self._width, self._height)
+                        return True, frame
+                    except queue.Empty:
+                        continue
+                logger.error("等待首帧超时 (%.0f 秒)，放弃", self._startup_timeout)
+                self._opened = False
+                return False, None
+
             try:
                 frame = self._queue.get(timeout=0.05)
                 if frame is None:  # 哨兵值，表示推流结束
