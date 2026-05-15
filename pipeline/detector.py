@@ -66,12 +66,17 @@ class ShipDetector:
         self._model = YOLO(model_path)
         self._patch_ultralytics_cfg()
 
-        # 预热
+        # 预热（ultralytics verbose 输出走 stdout，子进程 stdout 被 raw 帧占用，需重定向到 stderr）
+        import sys
+        _real_stdout = sys.stdout
         try:
+            sys.stdout = sys.stderr
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             self._model.track(source=dummy, persist=True, tracker=self._tracker_yaml, verbose=True, device=device or None)
         except Exception as e:
             logger.warning("YOLO 预热失败（不影响后续使用）: %s", e)
+        finally:
+            sys.stdout = _real_stdout
 
         logger.info("YOLO 模型加载完成，追踪器: %s", tracker_type)
 
