@@ -2156,6 +2156,8 @@ async def _receive_h264_camera_frames(
 
                             if use_queue:
                                 _queue_put_latest(frame_queue, frame)
+                                if frame_count % 30 == 0:
+                                    logger.info("[H264 Cam] 帧已入队: %d, 队列大小: %d", frame_count, frame_queue.qsize())
                             else:
                                 _, jpg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                                 if frames_dir:

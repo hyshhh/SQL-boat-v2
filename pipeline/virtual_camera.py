@@ -59,7 +59,7 @@ class VirtualCamera:
             if not self._first_frame_received:
                 if self._queue_startup_deadline == 0.0:
                     self._queue_startup_deadline = time.time() + self._startup_timeout
-                    logger.info("等待首帧（队列模式，超时 %.0f 秒）...", self._startup_timeout)
+                    logger.info("等待首帧（队列模式，超时 %.0f 秒，队列当前: %d）...", self._startup_timeout, self._queue.qsize())
                 while time.time() < self._queue_startup_deadline:
                     try:
                         frame = self._queue.get(timeout=0.1)
@@ -71,11 +71,13 @@ class VirtualCamera:
                         self._frame_count += 1
                         if self._width == 0:
                             self._height, self._width = frame.shape[:2]
-                        logger.info("首帧已收到（队列模式）: %dx%d", self._width, self._height)
+                        logger.info("首帧已收到（队列模式）: %dx%d, 队列剩余: %d", self._width, self._height, self._queue.qsize())
                         return True, frame
                     except queue.Empty:
+                        if self._frame_count == 0 and self._queue.qsize() > 0:
+                            logger.warning("等待首帧: 队列有 %d 帧但 get() 返回 Empty", self._queue.qsize())
                         continue
-                logger.error("等待首帧超时 (%.0f 秒)，放弃", self._startup_timeout)
+                logger.error("等待首帧超时 (%.0f 秒)，放弃。队列当前: %d", self._startup_timeout, self._queue.qsize())
                 self._opened = False
                 return False, None
 
@@ -88,11 +90,14 @@ class VirtualCamera:
                 self._frame_count += 1
                 if self._width == 0:
                     self._height, self._width = frame.shape[:2]
+                    logger.info("VirtualCamera 首帧: %dx%d, 队列剩余: %d", self._width, self._height, self._queue.qsize())
                 return True, frame
             except queue.Empty:
                 # 队列空，返回上一帧（如果有）
                 if self._last_frame is not None:
                     return True, self._last_frame.copy()
+                if self._frame_count == 0 and self._queue.qsize() > 0:
+                    logger.warning("VirtualCamera 队列有 %d 帧但读取失败", self._queue.qsize())
                 return False, None
 
         # ── 磁盘模式（兼容旧架构）──
