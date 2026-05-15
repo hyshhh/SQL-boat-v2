@@ -301,6 +301,7 @@
               <li><strong>视频编码模式</strong>：
                 <ul>
                   <li><strong>MJPEG</strong>：逐帧 JPEG 传输，兼容性好，延迟较低</li>
+                  <li><strong>H264</strong>：浏览器 MediaRecorder 硬件编码，带宽占用低，需浏览器支持</li>
                   <li><strong>WebRTC</strong>：浏览器直连服务器，超低延迟，推荐局域网使用</li>
                 </ul>
               </li>
@@ -347,11 +348,12 @@
               <div class="input-group">
                 <select id="camStreamMode">
                   <option value="mjpeg">MJPEG（逐帧 JPEG，低延迟）</option>
-                  <option value="h264">WebRTC（超低延迟，直连推流）</option>
+                  <option value="h264">H264（MediaRecorder 编码，低带宽）</option>
+                  <option value="webrtc">WebRTC（超低延迟，直连推流）</option>
                 </select>
               </div>
               <div class="param-hint" style="font-size:11px;color:#888;margin-top:4px">
-                WebRTC 浏览器直连服务器，延迟最低，无需 ffmpeg 中间转码
+                MJPEG：逐帧 JPEG，兼容性最好 | H264：浏览器硬件编码，带宽低 | WebRTC：直连推流，延迟最低
               </div>
             </div>
             <div class="param-hint" id="camStreamModeHint" style="font-size:11px;color:#888;display:none">

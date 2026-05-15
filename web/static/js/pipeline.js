@@ -734,6 +734,7 @@ let browserCameraStream = null;   // MediaStream
 let browserCameraWs = null;       // WebSocket
 let browserCameraTimer = null;    // 帧捕获定时器
 let browserCameraCanvas = null;   // 离屏 canvas
+let browserCameraMediaRecorder = null; // H264 MediaRecorder
 let browserCameraCaptureFps = 15; // 推帧帧率
 
 function onCameraSourceChange() {
@@ -823,9 +824,12 @@ async function startBrowserCamera() {
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${cameraTaskId}`;
 
-    if (streamMode === 'h264') {
+    if (streamMode === 'webrtc') {
       // ── WebRTC 模式：浏览器直连服务器，超低延迟 ──
       setupWebRTCCamera(cameraTaskId, stream);
+    } else if (streamMode === 'h264') {
+      // ── H264 模式：MediaRecorder 编码 → WebSocket ──
+      setupH264CameraWs(wsUrl, stream);
     } else {
       // ── MJPEG 模式：逐帧 JPEG → WebSocket ──
       setupMjpegCameraWs(wsUrl, stream);
@@ -880,6 +884,90 @@ function setupMjpegCameraWs(wsUrl, stream) {
   const ws = new WebSocket(wsUrl);
   browserCameraWs = ws;
   setupWsHandlers(ws);
+}
+
+/** H264 模式：MediaRecorder 编码 → WebSocket 推流 */
+function setupH264CameraWs(wsUrl, stream) {
+  // 检查 H264 MediaRecorder 支持
+  const h264Mime = 'video/mp4; codecs="avc1.42E01E"';
+  const h264Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(h264Mime);
+  const vp8Mime = 'video/webm; codecs="vp8"';
+  const vp8Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(vp8Mime);
+
+  if (!h264Supported && !vp8Supported) {
+    showToast('当前浏览器不支持 MediaRecorder 编码，已回退到 MJPEG 模式', 'info');
+    setupMjpegCameraWs(wsUrl, stream);
+    return;
+  }
+
+  const useMime = h264Supported ? h264Mime : vp8Mime;
+  const codecName = h264Supported ? 'h264' : 'vp8';
+
+  const ws = new WebSocket(wsUrl);
+  browserCameraWs = ws;
+
+  ws.onopen = () => {
+    showToast(`摄像头已连接 (H264/${codecName})，开始推流`);
+    updateCameraStatus('running', `H264(${codecName}) 推流中...`);
+    document.getElementById('btnStartCamera').style.display = 'none';
+    document.getElementById('btnStopCamera').style.display = '';
+
+    // 结果推流：H264 MSE 播放
+    connectCameraH264(cameraTaskId);
+    startCameraPolling();
+
+    // 首条消息：JSON 文本告知后端编码格式
+    ws.send(JSON.stringify({ codec: codecName }));
+
+    // 创建 MediaRecorder
+    try {
+      const recorder = new MediaRecorder(stream, {
+        mimeType: useMime,
+        videoBitsPerSecond: 2_000_000, // 2 Mbps
+      });
+      browserCameraMediaRecorder = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+          e.data.arrayBuffer().then(buf => ws.send(buf));
+        }
+      };
+      recorder.onerror = (e) => {
+        console.error('MediaRecorder 错误:', e.error);
+        showToast('H264 编码出错，已停止推流', 'error');
+      };
+      // 每 200ms 产出一个 chunk
+      recorder.start(200);
+    } catch (e) {
+      console.error('MediaRecorder 创建失败:', e);
+      showToast('H264 编码启动失败: ' + e.message, 'error');
+      ws.close();
+    }
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      if (!msg.ok) console.warn('帧处理失败:', msg.error);
+    } catch {}
+  };
+
+  ws.onerror = () => { console.warn('H264 WebSocket 错误'); };
+
+  ws.onclose = (evt) => {
+    if (!cameraTaskId) return;
+    if (evt.code !== 1000) {
+      showToast('摄像头连接断开，尝试重连…', 'info');
+      _scheduleReconnect('h264-upload-cam', () => {
+        if (!cameraTaskId) return;
+        const newWs = new WebSocket(wsUrl);
+        browserCameraWs = newWs;
+        // 重连时重新走完整 onopen 流程（简化处理：回退 MJPEG）
+        showToast('H264 重连暂不支持，已回退 MJPEG', 'info');
+        setupMjpegCameraWs(wsUrl, stream);
+      }, cameraTaskId);
+    }
+  };
 }
 
 /** WebRTC 模式：浏览器直连服务器，超低延迟推流 */
@@ -1010,6 +1098,11 @@ function startFrameCapture(ws, stream) {
 
 function stopFrameCapture() {
   _clearReconnect('mjpeg-cam');
+  _clearReconnect('h264-upload-cam');
+  if (browserCameraMediaRecorder && browserCameraMediaRecorder.state !== 'inactive') {
+    browserCameraMediaRecorder.stop();
+  }
+  browserCameraMediaRecorder = null;
   if (browserCameraTimer) {
     if (typeof browserCameraTimer === 'number') {
       clearInterval(browserCameraTimer);
