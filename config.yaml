@@ -72,7 +72,8 @@ pipeline:
   gap_num: 150
   demo: false
   yolo_model: "yolov8n.pt"
-  device: "0"
+  device: "0"                  # GPU 设备号（空=CPU，"0"=第一张GPU）
+  ffmpeg_encoder: "h264_nvenc" # H264 编码器（h264_nvenc=GPU，libx264=CPU）
   conf_threshold: 0.25
   detect_every_n_frames: 2
   tracker: "bytetrack"
