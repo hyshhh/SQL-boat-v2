@@ -1331,8 +1331,31 @@ function connectCameraH264(taskId) {
   _camH264SourceBuffer = null;
   _camH264Queue = [];
 
-  // H264 结果流可能需要几秒才就绪（ffmpeg 启动 + 首帧编码），延迟连接
   let _connectAttempt = 0;
+
+  function _processCamQueue() {
+    const sb = _camH264SourceBuffer;
+    if (!sb || sb.updating) return;
+    try {
+      const vEl = document.getElementById('cameraStream');
+      if (vEl && sb.buffered.length > 0 && sb.buffered.start(0) < vEl.currentTime - 8) {
+        sb.remove(sb.buffered.start(0), vEl.currentTime - 3);
+        return;
+      }
+    } catch (e) {}
+    if (_camH264Queue.length > 0) {
+      try { sb.appendBuffer(_camH264Queue.shift()); } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+          _camH264Queue.length = 0;
+          try {
+            const vEl = document.getElementById('cameraStream');
+            if (vEl && sb.buffered.length > 0) sb.remove(sb.buffered.start(0), vEl.currentTime);
+          } catch (e2) {}
+        }
+      }
+    }
+  }
+
   function _tryConnect() {
     _connectAttempt++;
     if (_connectAttempt > 1) {
@@ -1344,29 +1367,6 @@ function connectCameraH264(taskId) {
 
     let frameCount = 0;
     let fpsTimer = performance.now();
-
-    function _processCamQueue() {
-      const sb = _camH264SourceBuffer;
-      if (!sb || sb.updating) return;
-      try {
-        const vEl = document.getElementById('cameraStream');
-        if (vEl && sb.buffered.length > 0 && sb.buffered.start(0) < vEl.currentTime - 8) {
-          sb.remove(sb.buffered.start(0), vEl.currentTime - 3);
-          return;
-        }
-      } catch (e) {}
-      if (_camH264Queue.length > 0) {
-        try { sb.appendBuffer(_camH264Queue.shift()); } catch (e) {
-          if (e.name === 'QuotaExceededError') {
-            _camH264Queue.length = 0;
-            try {
-              const vEl = document.getElementById('cameraStream');
-              if (vEl && sb.buffered.length > 0) sb.remove(sb.buffered.start(0), vEl.currentTime);
-            } catch (e2) {}
-          }
-        }
-      }
-    }
 
     ws.onmessage = (evt) => {
       if (evt.data instanceof ArrayBuffer) {
@@ -1434,7 +1434,6 @@ function connectCameraH264(taskId) {
 
     ws.onclose = () => {
       if (cameraTaskId === taskId && _connectAttempt < 10) {
-        // 指数退避重试，最大 8 秒间隔
         const delay = Math.min(1000 * Math.pow(1.5, _connectAttempt - 1), 8000);
         if (fpsEl) fpsEl.textContent = `重连中 (${(delay/1000).toFixed(1)}s)...`;
         setTimeout(() => {
@@ -1443,12 +1442,14 @@ function connectCameraH264(taskId) {
       }
     };
     ws.onerror = () => {};
-  });
+  }
 
-  // 首次延迟 1.5 秒再连接，给后端 ffmpeg 启动时间
-  setTimeout(() => {
-    if (cameraTaskId === taskId) _tryConnect();
-  }, 1500);
+  ms.addEventListener('sourceopen', () => {
+    // 首次延迟 1.5 秒再连接，给后端 ffmpeg 启动时间
+    setTimeout(() => {
+      if (cameraTaskId === taskId) _tryConnect();
+    }, 1500);
+  });
 }
 
 function disconnectCameraH264() {
