@@ -124,7 +124,7 @@ class PipelineStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 摄像头推帧帧率
-    pipe_scale: float = 0.7  # pipe 输出缩放系数 (0.1-1.0)
+    pipe_scale: float = 0.5  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -145,7 +145,7 @@ class BrowserCameraStartRequest(BaseModel):
     detect_every: int = 2
     target_fps: float = 0
     capture_fps: int = 15  # 浏览器推帧帧率
-    pipe_scale: float = 0.7  # pipe 输出缩放系数 (0.1-1.0)
+    pipe_scale: float = 0.5  # pipe 输出缩放系数 (0.1-1.0)
     # ── 高级参数 ──
     max_frames: int = 0
     device: str = ""
@@ -850,6 +850,8 @@ async def get_pipeline_logs(task_id: str, since: int = 0):
     logs = _pipeline_logs.get(task_id)
     if logs is None:
         return {"logs": [], "total": 0}
+    if since > len(logs):
+        since = 0  # 索引越界（FIFO 删除导致），返回全部
     return {"logs": logs[since:], "total": len(logs)}
 
 
