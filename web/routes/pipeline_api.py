@@ -2070,11 +2070,12 @@ async def _receive_h264_camera_frames(
     # 所以不强制指定输入格式，让 ffmpeg 自动探测（同时增加 probesize 加速识别）
     ffmpeg_bin = _find_binary("ffmpeg") or "ffmpeg"
     ffmpeg_cmd = [
-        ffmpeg_bin, "-hide_banner", "-loglevel", "info",
-        "-fflags", "+nobuffer+discardcorrupt",
+        ffmpeg_bin, "-hide_banner", "-loglevel", "warning",
+        "-fflags", "+nobuffer+discardcorrupt+fastseek",
         "-flags", "+low_delay",
-        "-probesize", "32768",        # 32KB 探测，加速格式识别
-        "-analyzeduration", "500000",  # 500ms 分析时间
+        "-probesize", "16384",        # 16KB 探测（更小更快）
+        "-analyzeduration", "200000",  # 200ms 分析时间
+        "-max_delay", "0",            # 无延迟缓冲
         "-i", "pipe:0",
         "-vf", "scale=640:480",  # 强制输出目标分辨率
         "-f", "rawvideo",
