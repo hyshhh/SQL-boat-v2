@@ -888,27 +888,45 @@ function setupMjpegCameraWs(wsUrl, stream) {
 
 /** H264 模式：MediaRecorder 编码 → WebSocket 推流 */
 function setupH264CameraWs(wsUrl, stream) {
-  // 检查 H264 MediaRecorder 支持
-  const h264Mime = 'video/mp4; codecs="avc1.42E01E"';
-  const h264Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(h264Mime);
+  // 检查 H264 MediaRecorder 支持 — 优先 avc1，fallback vp8
+  const h264Mimes = [
+    'video/mp4; codecs="avc1.42E01E"',  // Baseline 3.1
+    'video/mp4; codecs="avc1.4D401E"',  // Main 3.1
+    'video/mp4; codecs="avc1.64001E"',  // High 3.1
+    'video/webm; codecs="h264"',        // WebM 容器 + H264
+  ];
   const vp8Mime = 'video/webm; codecs="vp8"';
-  const vp8Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(vp8Mime);
 
-  if (!h264Supported && !vp8Supported) {
+  let useMime = null;
+  let codecName = null;
+
+  for (const mime of h264Mimes) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
+      useMime = mime;
+      codecName = 'h264';
+      break;
+    }
+  }
+  if (!useMime && typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(vp8Mime)) {
+    useMime = vp8Mime;
+    codecName = 'vp8';
+  }
+
+  if (!useMime) {
     showToast('当前浏览器不支持 MediaRecorder 编码，已回退到 MJPEG 模式', 'info');
     setupMjpegCameraWs(wsUrl, stream);
     return;
   }
 
-  const useMime = h264Supported ? h264Mime : vp8Mime;
-  const codecName = h264Supported ? 'h264' : 'vp8';
+  console.log(`[H264 Camera] 使用 codec: ${codecName}, mime: ${useMime}`);
+  showToast(`使用编码: ${useMime}`, 'info');
 
   const ws = new WebSocket(wsUrl);
   browserCameraWs = ws;
 
   ws.onopen = () => {
-    showToast(`摄像头已连接 (H264/${codecName})，开始推流`);
-    updateCameraStatus('running', `H264(${codecName}) 推流中...`);
+    showToast(`摄像头已连接 (${codecName.toUpperCase()})，开始推流`);
+    updateCameraStatus('running', `${codecName.toUpperCase()} 推流中...`);
     document.getElementById('btnStartCamera').style.display = 'none';
     document.getElementById('btnStopCamera').style.display = '';
 
@@ -927,20 +945,23 @@ function setupH264CameraWs(wsUrl, stream) {
       });
       browserCameraMediaRecorder = recorder;
 
+      let chunkCount = 0;
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+          chunkCount++;
           e.data.arrayBuffer().then(buf => ws.send(buf));
         }
       };
       recorder.onerror = (e) => {
         console.error('MediaRecorder 错误:', e.error);
-        showToast('H264 编码出错，已停止推流', 'error');
+        showToast('编码出错，已停止推流', 'error');
       };
-      // 每 200ms 产出一个 chunk
-      recorder.start(200);
+      // timeslice=100ms: 产出频率约 10 chunk/s，降低延迟
+      recorder.start(100);
+      console.log(`[H264 Camera] MediaRecorder 已启动, timeslice=100ms`);
     } catch (e) {
       console.error('MediaRecorder 创建失败:', e);
-      showToast('H264 编码启动失败: ' + e.message, 'error');
+      showToast('编码启动失败: ' + e.message, 'error');
       ws.close();
     }
   };
