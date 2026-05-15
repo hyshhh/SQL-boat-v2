@@ -72,7 +72,7 @@ pipeline:
   gap_num: 150
   demo: false
   yolo_model: "yolov8n.pt"
-  device: ""
+  device: "0"
   conf_threshold: 0.25
   detect_every_n_frames: 2
   tracker: "bytetrack"
