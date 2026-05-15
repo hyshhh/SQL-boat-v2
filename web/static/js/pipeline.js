@@ -616,8 +616,11 @@ async function pollPipelineLogs() {
     if (data.logs && data.logs.length > 0) {
       const box = document.getElementById('pipelineLogContent');
       if (!box) return;
-      const maxLines = parseInt(document.getElementById('optMaxLogLines')?.value, 10) || 10;
       const levelColors = { exact: '#4caf50', semantic: '#ff9800', miss: '#f44336' };
+      // log_start 表示后端发生过 FIFO 清理，前端需要重置
+      if (data.log_start !== undefined) {
+        box.innerHTML = '';
+      }
       for (const entry of data.logs) {
         const level = entry.level || 'miss';
         const color = levelColors[level] || '#f44336';
@@ -625,9 +628,6 @@ async function pollPipelineLogs() {
         div.className = 'log-entry';
         div.innerHTML = `<span class="log-time">${entry.time}</span><span style="color:${color}">${entry.line}</span>`;
         box.appendChild(div);
-      }
-      while (box.children.length > maxLines) {
-        box.removeChild(box.firstChild);
       }
       _logIndex = data.total;
       box.scrollTop = box.scrollHeight;

@@ -56,6 +56,7 @@ _h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, i
 
 # ── Pipeline 日志缓冲 ──
 _pipeline_logs: dict[str, list[dict]] = {}  # task_id → [{time, line}, ...]
+_log_start: dict[str, int] = {}             # task_id → logs[0] 的全局索引
 _MAX_LOG_LINES = 10  # 每个任务最大日志条数，超出后 FIFO 清理
 
 
@@ -696,6 +697,7 @@ async def start_pipeline(req: PipelineStartRequest):
             "is_camera": is_camera,
         }
     _pipeline_logs[task_id] = []
+    _log_start[task_id] = 0
 
     try:
         # 获取信号量（限制并发 pipeline 数量）
@@ -784,7 +786,9 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
                     logs.append({"time": time.strftime("%H:%M:%S"), "line": line, "level": level, "track": track_id_str})
                     # FIFO 清理
                     if len(logs) > _MAX_LOG_LINES:
-                        del logs[:len(logs) - _MAX_LOG_LINES]
+                        overflow = len(logs) - _MAX_LOG_LINES
+                        del logs[:overflow]
+                        _log_start[task_id] = _log_start.get(task_id, 0) + overflow
 
             if text.startswith("__PIPELINE_SUMMARY__:"):
                 try:
@@ -822,6 +826,7 @@ async def _wait_pipeline(task_id: str, process: asyncio.subprocess.Process, sem:
             _stop_signals.discard(task_id)
             is_browser_cam = _task_status.get(task_id, {}).get("is_browser_camera", False)
         _pipeline_logs.pop(task_id, None)
+        _log_start.pop(task_id, None)
         if not is_browser_cam:
             _cleanup_stream_dir(task_id)
         _cleanup_old_tasks()
@@ -850,9 +855,13 @@ async def get_pipeline_logs(task_id: str, since: int = 0):
     logs = _pipeline_logs.get(task_id)
     if logs is None:
         return {"logs": [], "total": 0}
-    if since > len(logs):
-        since = 0  # 索引越界（FIFO 删除导致），返回全部
-    return {"logs": logs[since:], "total": len(logs)}
+    start = _log_start.get(task_id, 0)
+    total = start + len(logs)
+    if since < start:
+        # 索引已过期（FIFO 删除），返回全部当前日志 + log_start 让前端重置
+        return {"logs": logs, "total": total, "log_start": start}
+    offset = since - start
+    return {"logs": logs[offset:], "total": total}
 
 
 @router.post("/stop/{task_id}")
@@ -905,6 +914,7 @@ async def stop_pipeline(task_id: str):
             _stop_signals.discard(task_id)
         await _stop_h264_stream(task_id)
         _pipeline_logs.pop(task_id, None)
+        _log_start.pop(task_id, None)
         _cleanup_stream_dir(task_id)
         return {"success": True, "message": f"已停止任务: {task_id}"}
 
@@ -945,6 +955,7 @@ async def stop_pipeline(task_id: str):
 
     # 清理日志缓冲和帧目录
     _pipeline_logs.pop(task_id, None)
+    _log_start.pop(task_id, None)
     _cleanup_stream_dir(task_id)
 
     return {"success": True, "message": f"已停止任务: {task_id}"}
@@ -994,6 +1005,7 @@ async def _delayed_cleanup(task_id: str, delay: int = 10):
             _task_status[task_id]["progress"] = "处理完成（摄像头已断开）"
         _stop_signals.discard(task_id)
     _pipeline_logs.pop(task_id, None)
+    _log_start.pop(task_id, None)
     _cleanup_stream_dir(task_id)
 
 
@@ -1577,6 +1589,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             "stream_mode": req.stream_mode,
         }
     _pipeline_logs[task_id] = []
+    _log_start[task_id] = 0
 
     try:
         await sem.acquire()
@@ -1720,6 +1733,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 fake_proc._finished.set()
                 sem.release()
                 _pipeline_logs.pop(task_id, None)
+                _log_start.pop(task_id, None)
                 _cleanup_stream_dir(task_id)
 
             asyncio.run_coroutine_threadsafe(_finish(), _main_loop)
