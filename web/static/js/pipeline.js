@@ -1331,7 +1331,13 @@ function connectCameraH264(taskId) {
   _camH264SourceBuffer = null;
   _camH264Queue = [];
 
-  ms.addEventListener('sourceopen', () => {
+  // H264 结果流可能需要几秒才就绪（ffmpeg 启动 + 首帧编码），延迟连接
+  let _connectAttempt = 0;
+  function _tryConnect() {
+    _connectAttempt++;
+    if (_connectAttempt > 1) {
+      console.log(`[H264 Result] 重试连接 #${_connectAttempt}...`);
+    }
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     _camH264Ws = ws;
@@ -1427,14 +1433,22 @@ function connectCameraH264(taskId) {
     };
 
     ws.onclose = () => {
-      if (cameraTaskId === taskId) {
-        _scheduleReconnect('h264-cam', () => {
-          if (cameraTaskId === taskId) connectCameraH264(taskId);
-        }, taskId);
+      if (cameraTaskId === taskId && _connectAttempt < 10) {
+        // 指数退避重试，最大 8 秒间隔
+        const delay = Math.min(1000 * Math.pow(1.5, _connectAttempt - 1), 8000);
+        if (fpsEl) fpsEl.textContent = `重连中 (${(delay/1000).toFixed(1)}s)...`;
+        setTimeout(() => {
+          if (cameraTaskId === taskId) _tryConnect();
+        }, delay);
       }
     };
     ws.onerror = () => {};
   });
+
+  // 首次延迟 1.5 秒再连接，给后端 ffmpeg 启动时间
+  setTimeout(() => {
+    if (cameraTaskId === taskId) _tryConnect();
+  }, 1500);
 }
 
 function disconnectCameraH264() {
