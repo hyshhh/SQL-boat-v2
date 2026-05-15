@@ -1062,7 +1062,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
     output_args = [
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-frag_duration", "250000",  # 0.25 秒一个 fragment（更低延迟）
+        "-frag_duration", "100000",  # 0.1 秒一个 fragment（更小颗粒度，前端更流畅）
         "-flush_packets", "1",
         "-f", "mp4",
         "pipe:1",
@@ -1148,15 +1148,19 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         async def feed_frames():
             """从 pipeline stdout 读 raw 帧 → ffmpeg stdin
 
-            readexactly 一次读完整帧（2.7MB@640x480），避免多次 read 拼接
-            带来的异步调度延迟。进程被杀时 IncompleteReadError 由 except 捕获。
+            分块写入（每次 256KB），每块写入后 yield 让出 event loop，
+            防止 drain() 阻塞导致 read_ffmpeg_output 无法及时读取。
             """
             nonlocal running
+            chunk_size = 262144  # 256KB per chunk
             try:
                 while running:
                     data = await process.stdout.readexactly(frame_size)
                     if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
-                        ffmpeg_proc.stdin.write(data)
+                        # 分块写入，每块之间让出 event loop
+                        for off in range(0, len(data), chunk_size):
+                            ffmpeg_proc.stdin.write(data[off:off + chunk_size])
+                            await asyncio.sleep(0)  # 让 read_ffmpeg_output 有机会运行
                         await ffmpeg_proc.stdin.drain()
                         async with _state_lock:
                             stream = _h264_streams.get(task_id)
@@ -1176,7 +1180,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
             nonlocal box_buffer, init_sent, running
             try:
                 while running:
-                    chunk = await ffmpeg_proc.stdout.read(262144)  # 256KB buffer
+                    chunk = await ffmpeg_proc.stdout.read(1048576)  # 1MB buffer，减少读取频率
                     if not chunk:
                         break
                     box_buffer += chunk
