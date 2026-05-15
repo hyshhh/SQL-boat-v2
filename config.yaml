@@ -27,7 +27,7 @@ vector_store:
 
 # 数据库后端配置（csv 或 sqlite）
 database:
-  backend: "csv"
+  backend: "sqlite"
   sqlite_path: "./data/ships.db"
 
 # 应用配置
