@@ -132,6 +132,7 @@ class PipelineStartRequest(BaseModel):
     yolo_model: str = ""
     prompt_mode: str = "detailed"
     enable_refresh: bool = True
+    skip_refresh_matched: bool = False
     gap_num: int = 150
     max_concurrent: int = 4
 
@@ -153,6 +154,7 @@ class BrowserCameraStartRequest(BaseModel):
     yolo_model: str = ""
     prompt_mode: str = "detailed"
     enable_refresh: bool = True
+    skip_refresh_matched: bool = False
     gap_num: int = 150
     max_concurrent: int = 4
 
@@ -657,6 +659,8 @@ async def start_pipeline(req: PipelineStartRequest):
     if req.enable_refresh:
         cmd.append("--enable-refresh")
         cmd.extend(["--gap-num", str(req.gap_num)])
+    if req.skip_refresh_matched:
+        cmd.append("--skip-refresh-matched")
 
     # pipe 输出缩放
     if 0.1 <= req.pipe_scale < 1.0:
@@ -1703,6 +1707,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         if req.enable_refresh:
             pipe_cfg["enable_refresh"] = True
             pipe_cfg["gap_num"] = req.gap_num
+        pipe_cfg["skip_refresh_matched"] = req.skip_refresh_matched
         config["pipeline"] = pipe_cfg
 
         def _run_pipeline():

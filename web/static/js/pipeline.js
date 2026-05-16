@@ -242,6 +242,7 @@ function collectVideoParams() {
     yolo_model: document.getElementById('optYoloModel').value.trim(),
     prompt_mode: document.getElementById('optPromptMode').value,
     enable_refresh: document.getElementById('optEnableRefresh').checked,
+    skip_refresh_matched: document.getElementById('optSkipRefreshMatched').checked,
     gap_num: parseInt(document.getElementById('optGapNum').value, 10) || 150,
     max_concurrent: parseInt(document.getElementById('optMaxConcurrent').value, 10) || 4,
   };
@@ -262,6 +263,7 @@ function collectCameraParams() {
     yolo_model: document.getElementById('camYoloModel').value.trim(),
     prompt_mode: document.getElementById('camPromptMode').value,
     enable_refresh: document.getElementById('camEnableRefresh').checked,
+    skip_refresh_matched: document.getElementById('camSkipRefreshMatched').checked,
     gap_num: parseInt(document.getElementById('camGapNum').value, 10) || 150,
     max_concurrent: parseInt(document.getElementById('camMaxConcurrent').value, 10) || 4,
     stream_mode: (document.getElementById('camStreamMode') || {}).value || 'mjpeg',

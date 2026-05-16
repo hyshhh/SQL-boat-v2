@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--process-every", type=int, default=None, help="每 N 帧处理一次（默认沿用 config.yaml）")
     parser.add_argument("--enable-refresh", action="store_true", default=None, help="开启定时刷新")
     parser.add_argument("--no-refresh", action="store_true", default=None, help="关闭定时刷新")
+    parser.add_argument("--skip-refresh-matched", action="store_true", default=None, help="精确匹配的 track 跳过定时刷新")
+    parser.add_argument("--no-skip-refresh-matched", action="store_true", default=None, help="所有 track 均参与定时刷新")
     parser.add_argument("--gap-num", type=int, default=None, help="定时刷新间隔帧数（默认 150）")
     parser.add_argument("--prompt-mode", choices=["detailed", "brief"], default=None, help="提示词模式")
     parser.add_argument("--max-frames", type=int, default=0, help="最大处理帧数（0 = 不限制）")
@@ -91,6 +93,10 @@ def _merge_args_to_config(args, config: dict) -> dict:
         config["pipeline"]["enable_refresh"] = args.enable_refresh
     elif args.no_refresh is not None:
         config["pipeline"]["enable_refresh"] = not args.no_refresh
+    if args.skip_refresh_matched is not None:
+        config["pipeline"]["skip_refresh_matched"] = args.skip_refresh_matched
+    elif args.no_skip_refresh_matched is not None:
+        config["pipeline"]["skip_refresh_matched"] = not args.no_skip_refresh_matched
     if args.gap_num is not None:
         config["pipeline"]["gap_num"] = max(1, args.gap_num)
     if args.no_output:

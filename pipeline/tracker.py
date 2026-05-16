@@ -87,6 +87,9 @@ class TrackManager:
             info.recognized = True
             info.pending = False
             info.last_recognized_frame = frame_id
+            # 重置匹配标志，由后续 bind_db_match / bind_semantic_matches 根据最新结果重新设定
+            info.db_matched = False
+            info.semantic_match_ids = []
 
     def bind_db_match(self, track_id: int, db_match_id: str, db_match_desc: str) -> None:
         with self._lock:
