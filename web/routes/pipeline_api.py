@@ -271,29 +271,6 @@ def _probe_video_size(video_path: str) -> tuple[int, int] | None:
     return None
 
 
-def _probe_video_fps(video_path: str) -> float | None:
-    """用 ffprobe 检测视频帧率。"""
-    _ensure_ffmpeg()
-    if not _FFPROBE:
-        return None
-    try:
-        ret = subprocess.run(
-            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=r_frame_rate",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True, timeout=30,
-        )
-        if ret.returncode == 0:
-            fps_str = ret.stdout.strip()
-            if "/" in fps_str:
-                num, den = fps_str.split("/")
-                return float(num) / float(den)
-            return float(fps_str)
-    except Exception as e:
-        logger.warning("ffprobe 帧率检测失败: %s → %s", video_path, e)
-    return None
-
-
 def _is_browser_compatible(video_path: str) -> bool:
     """检测视频是否被浏览器原生兼容。"""
     codec = _probe_codec(video_path)
@@ -630,7 +607,6 @@ async def start_pipeline(req: PipelineStartRequest):
 
     # 探测视频分辨率（H.264 编码需要知道帧尺寸）
     video_w, video_h = 640, 480  # 默认值
-    source_fps = 0.0
     if is_camera:
         # 摄像头/RTSP：提前探测分辨率
         cam_source = video_source if not video_source.startswith("__camera__") else video_source.replace("__camera__", "")
@@ -645,9 +621,6 @@ async def start_pipeline(req: PipelineStartRequest):
         if detected:
             video_w, video_h = detected
             logger.info("视频分辨率: %dx%d", video_w, video_h)
-        source_fps = _probe_video_fps(str(video_path))
-        if source_fps:
-            logger.info("视频帧率: %.2f fps", source_fps)
 
     # 构建 pipeline 命令
     config = load_config()
@@ -740,8 +713,7 @@ async def start_pipeline(req: PipelineStartRequest):
             _running_processes[task_id] = process
 
         # 启动 H.264 编码器（从 pipeline stdout 读 raw 帧 → ffmpeg → fMP4）
-        # fps 必须匹配 pipeline 实际输出帧率，否则播放速度错乱
-        h264_fps = int(req.target_fps) if req.target_fps > 0 else (int(source_fps) if source_fps else 15)
+        h264_fps = int(req.target_fps) if req.target_fps > 0 else 15
         asyncio.create_task(_start_h264_reader(task_id, process, pipe_w, pipe_h, fps=h264_fps))
 
         asyncio.create_task(_wait_pipeline(task_id, process, sem))
@@ -1087,15 +1059,10 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
     ]
 
     # 公共输出参数（fMP4 容器）
-    # 显式指定 BT.709 色彩空间 + full range，避免播放器假设 BT.601 导致偏色
     output_args = [
         "-pix_fmt", "yuv420p",
-        "-color_range", "pc",
-        "-colorspace", "bt709",
-        "-color_trc", "bt709",
-        "-color_primaries", "bt709",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-        "-frag_duration", "100000",  # 0.1 秒一个 fragment（更小颗粒度，前端更流畅）
+        "-frag_duration", "250000",  # 0.25 秒一个 fragment（更低延迟）
         "-flush_packets", "1",
         "-f", "mp4",
         "pipe:1",
@@ -1178,27 +1145,18 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
             except (asyncio.IncompleteReadError, OSError):
                 pass
 
-        def _write_stdin(data: bytes):
-            """同步写入 ffmpeg stdin 线程缓冲区（在线程池中运行，不阻塞 event loop）"""
-            try:
-                ffmpeg_proc.stdin.write(data)
-            except Exception:
-                pass
-
         async def feed_frames():
             """从 pipeline stdout 读 raw 帧 → ffmpeg stdin
 
-            write() 放线程池（避免阻塞），drain() 在 event loop 中 await
-            （drain 会正确 yield，让 read_ffmpeg_output 能并发运行）。
-            这样即使 OS pipe 缓冲满，event loop 仍能消费 ffmpeg 输出，避免死锁。
+            readexactly 一次读完整帧（2.7MB@640x480），避免多次 read 拼接
+            带来的异步调度延迟。进程被杀时 IncompleteReadError 由 except 捕获。
             """
             nonlocal running
             try:
                 while running:
                     data = await process.stdout.readexactly(frame_size)
                     if ffmpeg_proc.stdin and not ffmpeg_proc.stdin.is_closing():
-                        # write() 放线程池，drain() 在 event loop 中 await
-                        await loop.run_in_executor(None, _write_stdin, data)
+                        ffmpeg_proc.stdin.write(data)
                         await ffmpeg_proc.stdin.drain()
                         async with _state_lock:
                             stream = _h264_streams.get(task_id)
@@ -1218,7 +1176,7 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
             nonlocal box_buffer, init_sent, running
             try:
                 while running:
-                    chunk = await ffmpeg_proc.stdout.read(1048576)  # 1MB buffer，减少读取频率
+                    chunk = await ffmpeg_proc.stdout.read(262144)  # 256KB buffer
                     if not chunk:
                         break
                     box_buffer += chunk
