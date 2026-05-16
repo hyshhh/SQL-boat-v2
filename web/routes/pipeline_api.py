@@ -661,6 +661,8 @@ async def start_pipeline(req: PipelineStartRequest):
         cmd.extend(["--gap-num", str(req.gap_num)])
     if req.skip_refresh_matched:
         cmd.append("--skip-refresh-matched")
+    else:
+        cmd.append("--no-skip-refresh-matched")
 
     # pipe 输出缩放
     if 0.1 <= req.pipe_scale < 1.0:
