@@ -68,6 +68,31 @@ if (videoUploadZone) {
   });
 }
 
+// ── 最大日志条数动态调整 ──
+const maxLogInput = document.getElementById('optMaxLogLines');
+if (maxLogInput) {
+  // 从后端加载当前值
+  (async () => {
+    try {
+      const resp = await fetch(`${PIPE_API}/settings/logs`);
+      const data = await resp.json();
+      maxLogInput.value = data.max_log_lines;
+    } catch (e) {}
+  })();
+  maxLogInput.addEventListener('change', async function () {
+    const val = parseInt(this.value);
+    if (isNaN(val) || val < 1) { this.value = 1; return; }
+    if (val > 500) { this.value = 500; return; }
+    try {
+      await fetch(`${PIPE_API}/settings/logs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_log_lines: val })
+      });
+    } catch (e) {}
+  });
+}
+
 async function handleVideoUpload(file) {
   const allowedExts = ['.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.webm'];
   const ext = '.' + file.name.split('.').pop().toLowerCase();
@@ -620,10 +645,12 @@ async function pollPipelineLogs() {
       const box = document.getElementById('pipelineLogContent');
       if (!box) return;
       const levelColors = { exact: '#4caf50', semantic: '#ff9800', miss: '#f44336' };
-      // log_start 表示后端发生过 FIFO 清理，前端需要重置
+      // FIFO 清理：只移除被淘汰的最旧条目，不清空全部 DOM
       if (data.log_start !== undefined && data.log_start !== _logStart) {
-        box.innerHTML = '';
-        _logIndex = 0;
+        const removed = data.log_start - _logStart;
+        for (let i = 0; i < removed; i++) {
+          if (box.firstElementChild) box.removeChild(box.firstElementChild);
+        }
         _logStart = data.log_start;
       }
       for (const entry of data.logs) {

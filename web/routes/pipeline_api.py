@@ -57,7 +57,7 @@ _h264_streams: dict[str, dict[str, Any]] = {}  # task_id → {ffmpeg, viewers, i
 # ── Pipeline 日志缓冲 ──
 _pipeline_logs: dict[str, list[dict]] = {}  # task_id → [{time, line}, ...]
 _log_start: dict[str, int] = {}             # task_id → logs[0] 的全局索引
-_MAX_LOG_LINES = 10  # 每个任务最大日志条数，超出后 FIFO 清理
+_MAX_LOG_LINES = 10  # 每个任务最大日志条数，运行时可通过 API 动态调整
 
 
 def _get_demo_config() -> dict:
@@ -866,6 +866,26 @@ async def get_pipeline_logs(task_id: str, since: int = 0):
     if start > 0:
         result["log_start"] = start
     return result
+
+
+@router.get("/settings/logs")
+async def get_log_settings():
+    """获取日志模块的运行时设置"""
+    return {"max_log_lines": _MAX_LOG_LINES}
+
+
+@router.post("/settings/logs")
+async def update_log_settings(data: dict[str, Any]):
+    """动态调整最大日志条数"""
+    global _MAX_LOG_LINES
+    if "max_log_lines" not in data:
+        raise HTTPException(status_code=400, detail="缺少 max_log_lines 字段")
+    value = int(data["max_log_lines"])
+    if value < 1 or value > 500:
+        raise HTTPException(status_code=400, detail="max_log_lines 范围: 1-500")
+    _MAX_LOG_LINES = value
+    logger.info("最大日志条数已调整为 %d", value)
+    return {"max_log_lines": _MAX_LOG_LINES}
 
 
 @router.post("/stop/{task_id}")
