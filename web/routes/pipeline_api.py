@@ -1040,26 +1040,22 @@ def _get_browser_frames_dir(task_id: str) -> Path:
 async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, w: int = 640, h: int = 480, fps: int = 15):
     """后台任务：从 pipeline stdout 读取 raw BGR 帧，启动 ffmpeg 编码为 H.264 fMP4"""
 
-    # 读取编码器配置（默认 GPU h264_nvenc，fallback CPU libx264）
-    config = load_config()
-    encoder = config.get("pipeline", {}).get("ffmpeg_encoder", "h264_nvenc")
-
     # ffmpeg 命令：stdin raw BGR → H.264 fMP4
     ffmpeg_cmd = _find_binary("ffmpeg") or "ffmpeg"
     gop = max(1, fps)  # GOP = 帧率，确保每秒至少一个关键帧（低帧率时不需等太久）
-
-    # 公共输入参数
-    input_args = [
+    ffmpeg_args = [
         ffmpeg_cmd, "-hide_banner", "-loglevel", "error",
         "-fflags", "+nobuffer",   # 减少输入缓冲
         "-flags", "+low_delay",   # 低延迟模式
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-video_size", f"{w}x{h}",
         "-r", str(fps),  # 时间基准帧率（匹配目标 FPS）
         "-i", "pipe:0",
-    ]
-
-    # 公共输出参数（fMP4 容器）
-    output_args = [
+        "-c:v", "libx264",
+        "-preset", "ultrafast", "-tune", "zerolatency",
+        "-profile:v", "baseline", "-level", "3.1",
+        "-bf", "0",        # 无 B 帧（降低延迟）
+        "-g", str(gop),    # GOP = fps（每秒一个关键帧，低帧率时减少首次关键帧等待）
+        "-threads", "2",   # 限制编码线程，减少延迟
         "-pix_fmt", "yuv420p",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
         "-frag_duration", "250000",  # 0.25 秒一个 fragment（更低延迟）
@@ -1067,34 +1063,6 @@ async def _start_h264_reader(task_id: str, process: asyncio.subprocess.Process, 
         "-f", "mp4",
         "pipe:1",
     ]
-
-    # 根据编码器选择参数
-    if encoder == "h264_nvenc":
-        # NVIDIA GPU 编码 — 低延迟模式
-        logger.info("H264 编码器: h264_nvenc (GPU)")
-        encoder_args = [
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",         # 最快预设
-            "-tune", "ull",          # ultra low latency
-            "-rc", "vbr",            # 可变码率
-            "-cq", "23",             # 质量（越低越好，23 是平衡点）
-            "-bf", "0",              # 无 B 帧
-            "-g", str(gop),          # GOP = fps
-            "-delay", "0",           # 零延迟
-        ]
-    else:
-        # CPU 编码 — fallback
-        logger.info("H264 编码器: libx264 (CPU)")
-        encoder_args = [
-            "-c:v", "libx264",
-            "-preset", "ultrafast", "-tune", "zerolatency",
-            "-profile:v", "baseline", "-level", "3.1",
-            "-bf", "0",        # 无 B 帧（降低延迟）
-            "-g", str(gop),    # GOP = fps（每秒一个关键帧，低帧率时减少首次关键帧等待）
-            "-threads", "2",   # 限制编码线程，减少延迟
-        ]
-
-    ffmpeg_args = input_args + encoder_args + output_args
 
     # 状态初始化
     async with _state_lock:

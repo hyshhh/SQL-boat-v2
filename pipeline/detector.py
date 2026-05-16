@@ -69,7 +69,7 @@ class ShipDetector:
         # 预热
         try:
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self._model.track(source=dummy, persist=True, tracker=self._tracker_yaml, verbose=True, device=device or None)
+            self._model.track(source=dummy, persist=True, tracker=self._tracker_yaml, verbose=False, device=device or None)
         except Exception as e:
             logger.warning("YOLO 预热失败（不影响后续使用）: %s", e)
 
