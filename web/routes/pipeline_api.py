@@ -861,7 +861,11 @@ async def get_pipeline_logs(task_id: str, since: int = 0):
         # 索引已过期（FIFO 删除），返回全部当前日志 + log_start 让前端重置
         return {"logs": logs, "total": total, "log_start": start}
     offset = since - start
-    return {"logs": logs[offset:], "total": total}
+    # 始终返回 log_start（当 > 0 时），让前端感知 FIFO 清理
+    result = {"logs": logs[offset:], "total": total}
+    if start > 0:
+        result["log_start"] = start
+    return result
 
 
 @router.post("/stop/{task_id}")

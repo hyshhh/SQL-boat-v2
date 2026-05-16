@@ -35,6 +35,7 @@ let currentTaskId = null;
 let statusPollTimer = null;
 let logPollTimer = null;
 let _logIndex = 0;           // 已拉取的日志索引
+let _logStart = 0;           // 后端 FIFO 清理的全局偏移
 let streamWs = null;        // WebSocket 推流连接
 let _h264Ws = null;          // H.264 WebSocket
 let _h264MediaSource = null; // MediaSource
@@ -500,6 +501,7 @@ async function stopVideoPipeline() {
   stopStatusPolling();
   currentTaskId = null;
   _logIndex = 0;
+  _logStart = 0;
 
   // 清空识别日志
   const logContent = document.getElementById('pipelineLogContent');
@@ -535,6 +537,7 @@ function startStatusPolling() {
   statusPollTimer = setInterval(pollTaskStatus, 2000);
   // 启动日志轮询
   _logIndex = 0;
+  _logStart = 0;
   const logBox = document.getElementById('pipelineLogBox');
   if (logBox) logBox.style.display = '';
   const logContent = document.getElementById('pipelineLogContent');
@@ -618,8 +621,10 @@ async function pollPipelineLogs() {
       if (!box) return;
       const levelColors = { exact: '#4caf50', semantic: '#ff9800', miss: '#f44336' };
       // log_start 表示后端发生过 FIFO 清理，前端需要重置
-      if (data.log_start !== undefined) {
+      if (data.log_start !== undefined && data.log_start !== _logStart) {
         box.innerHTML = '';
+        _logIndex = 0;
+        _logStart = data.log_start;
       }
       for (const entry of data.logs) {
         const level = entry.level || 'miss';
