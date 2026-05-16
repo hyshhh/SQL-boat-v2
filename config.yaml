@@ -69,6 +69,7 @@ pipeline:
   save_screenshots: true
   prompt_mode: "detailed"
   enable_refresh: false
+  skip_refresh_matched: false  # 开启后，精确匹配过的 track 不再参与定时刷新，只刷新未匹配的
   gap_num: 150
   demo: false
   yolo_model: "yolov8n.pt"

@@ -54,12 +54,14 @@ class TrackManager:
             info = self._tracks[track_id]
             return not info.recognized and not info.pending
 
-    def needs_refresh(self, track_id: int, frame_id: int, gap_num: int) -> bool:
+    def needs_refresh(self, track_id: int, frame_id: int, gap_num: int, skip_matched: bool = False) -> bool:
         with self._lock:
             if track_id not in self._tracks:
                 return False
             info = self._tracks[track_id]
             if not info.recognized or info.pending:
+                return False
+            if skip_matched and info.db_matched:
                 return False
             if info.last_recognized_frame == 0:
                 return frame_id - info.first_seen_frame >= gap_num

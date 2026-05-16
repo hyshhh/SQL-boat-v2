@@ -68,6 +68,7 @@ class ShipPipeline:
         self._demo_enabled: bool = bool(pipe_cfg.get("demo", False))
         self._save_screenshots: bool = bool(pipe_cfg.get("save_screenshots", True))
         self._enable_refresh: bool = bool(pipe_cfg.get("enable_refresh", False))
+        self._skip_refresh_matched: bool = bool(pipe_cfg.get("skip_refresh_matched", False))
         self._gap_num: int = pipe_cfg.get("gap_num") or 150
         self._prompt_mode: str = pipe_cfg.get("prompt_mode") or "detailed"
         self._output_size: tuple[int, int] | None = None
@@ -117,12 +118,13 @@ class ShipPipeline:
         self._cached_display_frame: np.ndarray | None = None
 
         logger.info(
-            "ShipPipeline 初始化: mode=%s, workers=%d, process_every=%d, refresh=%s(gap=%d)",
+            "ShipPipeline 初始化: mode=%s, workers=%d, process_every=%d, refresh=%s(gap=%d, skip_matched=%s)",
             "concurrent" if self._concurrent_mode else "cascade",
             self._max_concurrent,
             self._process_every_n,
             "on" if self._enable_refresh else "off",
             self._gap_num,
+            "on" if self._skip_refresh_matched else "off",
         )
 
     # ── 链路日志 ──────────────────────────────
@@ -251,7 +253,7 @@ class ShipPipeline:
             if det.crop is None or det.crop.size == 0:
                 continue
             need_new = self._tracker.needs_recognition(det.track_id)
-            need_refresh = self._enable_refresh and self._tracker.needs_refresh(det.track_id, frame_id, self._gap_num)
+            need_refresh = self._enable_refresh and self._tracker.needs_refresh(det.track_id, frame_id, self._gap_num, self._skip_refresh_matched)
             if not need_new and not need_refresh:
                 continue
             self._tracker.mark_pending(det.track_id)
@@ -270,7 +272,7 @@ class ShipPipeline:
             if det.crop is None or det.crop.size == 0:
                 continue
             need_new = self._tracker.needs_recognition(det.track_id)
-            need_refresh = self._enable_refresh and self._tracker.needs_refresh(det.track_id, frame_id, self._gap_num)
+            need_refresh = self._enable_refresh and self._tracker.needs_refresh(det.track_id, frame_id, self._gap_num, self._skip_refresh_matched)
             if not need_new and not need_refresh:
                 continue
             self._tracker.mark_pending(det.track_id)
@@ -635,10 +637,12 @@ class ShipPipeline:
             if self._concurrent_mode:
                 self._start_workers()
 
-            logger.info("开始处理: source=%s, mode=%s, workers=%d, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
+            logger.info("开始处理: source=%s, mode=%s, workers=%d, refresh=%s(gap=%d, skip_matched=%s), detect_every=%d, process_every=%d",
                         source, "concurrent" if self._concurrent_mode else "cascade",
                         self._max_concurrent,
-                        "on" if self._enable_refresh else "off", self._gap_num, self._detect_every_n, self._process_every_n)
+                        "on" if self._enable_refresh else "off", self._gap_num,
+                        "on" if self._skip_refresh_matched else "off",
+                        self._detect_every_n, self._process_every_n)
 
             # 停止信号文件路径（外部可以通过创建此文件来请求停止）
             stop_file = None

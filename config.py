@@ -36,6 +36,7 @@ _DEFAULTS: dict[str, Any] = {
         "save_screenshots": True,
         "prompt_mode": "detailed",
         "enable_refresh": False,
+        "skip_refresh_matched": False,
         "gap_num": 150,
         "demo": False,
         "yolo_model": "yolov8n.pt",
