@@ -409,6 +409,9 @@ class ShipPipeline:
                 fh, fw = frame.shape[:2]
                 if fw != ow or fh != oh:
                     frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_AREA)
+            # 确保帧是紧凑的（stride = width * channels），避免 tobytes() 包含填充数据导致撕裂
+            if frame.strides[0] != frame.shape[1] * frame.shape[2]:
+                frame = np.ascontiguousarray(frame)
             # 等待队列有空间
             while not self._stop.is_set():
                 with self._lock:
