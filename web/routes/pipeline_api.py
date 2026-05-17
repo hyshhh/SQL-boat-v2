@@ -2152,6 +2152,11 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
             client_ip = request.headers.get("x-real-ip", "").strip()
         if not client_ip and request.client:
             client_ip = request.client.host
+        logger.info("客户端 IP 检测: xff=%s, real-ip=%s, client=%s → %s, task=%s",
+                     request.headers.get("x-forwarded-for", ""),
+                     request.headers.get("x-real-ip", ""),
+                     request.client.host if request.client else "None",
+                     client_ip, task_id)
         def _is_private(ip: str) -> bool:
             if ip.startswith(("10.", "192.168.", "127.", "::1", "fc", "fd")):
                 return True
@@ -2178,9 +2183,12 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
                 type="srflx",
             )
             await pc.addIceCandidate(synthetic)
-            logger.info("注入客户端公网候选: %s:%d (STUN 回退), task=%s", client_ip, client_port, task_id)
+            logger.info("注入客户端公网候选: %s:%d (STUN 回退), task=%s, _remote_candidates=%d",
+                         client_ip, client_port, task_id, len(pc._remote_candidates))
+        else:
+            logger.warning("客户端 IP 为私网或为空，跳过注入: %s, task=%s", client_ip, task_id)
     except Exception as e:
-        logger.debug("注入合成候选失败: %s", e)
+        logger.warning("注入合成候选失败: %s, task=%s", e, task_id, exc_info=True)
 
     # 创建 answer
     answer = await pc.createAnswer()
