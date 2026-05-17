@@ -2074,7 +2074,7 @@ def _patch_aioice_stun():
             orig_init(self, *args, **kwargs)
         aioice.ice.Connection.__init__ = _patched_init
         _PATCHED_AIOICE_STUN = True
-        logger.info("aioice STUN 已启用: stun.l.google.com:19302")
+        logger.info("aioice STUN 已启用: 218.106.147.53:3478")
     except ImportError:
         logger.warning("无法导入 aioice，跳过 STUN 补丁")
 
