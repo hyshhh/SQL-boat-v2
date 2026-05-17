@@ -1032,7 +1032,7 @@ function setupWebRTCCamera(taskId, stream) {
   async function connect() {
     try {
       pc = new RTCPeerConnection({
-        iceServers: [],  // 局域网无需 STUN/TURN
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       });
 
       // 添加摄像头轨道

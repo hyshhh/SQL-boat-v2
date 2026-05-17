@@ -1997,9 +1997,9 @@ async def _receive_webrtc_camera_frames(
         while True:
             # 带超时的 recv，防止连接静默断开时永久挂起
             try:
-                frame = await asyncio.wait_for(video_track.recv(), timeout=15.0)
+                frame = await asyncio.wait_for(video_track.recv(), timeout=30.0)
             except asyncio.TimeoutError:
-                logger.warning("WebRTC 15秒未收到帧，断开: %s", task_id)
+                logger.warning("WebRTC 30秒未收到帧，断开: %s", task_id)
                 break
             except Exception as e:
                 logger.debug("WebRTC track recv 结束: %s", e)
