@@ -1048,9 +1048,8 @@ function setupWebRTCCamera(taskId, stream) {
           return;
         }
         const timer = setTimeout(() => {
-          // 超时也继续，用已收集的候选
           resolve();
-        }, 3000);
+        }, 15000);
         pc.addEventListener('icegatheringstatechange', () => {
           if (pc.iceGatheringState === 'complete') {
             clearTimeout(timer);
