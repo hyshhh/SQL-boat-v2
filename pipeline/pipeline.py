@@ -383,7 +383,7 @@ class ShipPipeline:
                     except Exception:
                         pass
                 else:
-                    self._stop.wait(0.005)
+                    self._stop.wait(0.01)
 
     # ── Raw stdout 帧写入器 ────────────────────
 

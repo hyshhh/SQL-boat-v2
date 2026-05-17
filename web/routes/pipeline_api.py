@@ -1517,6 +1517,7 @@ async def camera_stream(task_id: str):
         target_interval = 0.04
         loop = asyncio.get_event_loop()
         no_frame_count = 0
+        last_yield_time = 0.0
 
         while True:
             async with _state_lock:
@@ -1525,6 +1526,11 @@ async def camera_stream(task_id: str):
                     break
 
             t0 = loop.time()
+
+            # 帧率控制：如果距离上次发送太近，跳过中间帧
+            if last_yield_time > 0 and (t0 - last_yield_time) < target_interval * 0.8:
+                await asyncio.sleep(target_interval * 0.2)
+                continue
 
             if frame_file.exists():
                 try:
@@ -1535,15 +1541,24 @@ async def camera_stream(task_id: str):
                         last_mtime = mtime
                         no_frame_count = 0
                         frame_data = await loop.run_in_executor(None, frame_file.read_bytes)
-                        if frame_data:
-                            yield (
-                                f"{boundary}\r\n"
-                                f"Content-Type: image/jpeg\r\n\r\n"
-                            ).encode() + frame_data + b"\r\n"
+                        if frame_data and len(frame_data) > 4:
+                            # JPEG 完整性校验：检查 SOI (\xff\xd8) 和 EOI (\xff\xd9) 标记
+                            if frame_data[:2] == b'\xff\xd8' and frame_data[-2:] == b'\xff\xd9':
+                                last_yield_time = loop.time()
+                                yield (
+                                    f"{boundary}\r\n"
+                                    f"Content-Type: image/jpeg\r\n\r\n"
+                                ).encode() + frame_data + b"\r\n"
+                            else:
+                                logger.warning("跳过不完整的 JPEG 帧 (task=%s)", task_id)
+                                continue
+                        else:
+                            continue
                     else:
                         no_frame_count += 1
                         if no_frame_count > 125:
                             no_frame_count = 0
+                            last_yield_time = loop.time()
                             yield (
                                 f"{boundary}\r\n"
                                 f"Content-Type: image/jpeg\r\n\r\n"
