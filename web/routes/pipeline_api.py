@@ -2058,10 +2058,33 @@ class WebRTCOfferRequest(BaseModel):
     type: str = "offer"
 
 
+# 服务端 STUN 探索：让 aioice Connection 默认使用 Google STUN 获取 srflx 公网候选
+_PATCHED_AIOICE_STUN = False
+
+def _patch_aioice_stun():
+    global _PATCHED_AIOICE_STUN
+    if _PATCHED_AIOICE_STUN:
+        return
+    try:
+        import aioice.ice
+        orig_init = aioice.ice.Connection.__init__
+        def _patched_init(self, *args, **kwargs):
+            if 'stun_server' not in kwargs or kwargs['stun_server'] is None:
+                kwargs['stun_server'] = ('stun.l.google.com', 19302)
+            orig_init(self, *args, **kwargs)
+        aioice.ice.Connection.__init__ = _patched_init
+        _PATCHED_AIOICE_STUN = True
+        logger.info("aioice STUN 已启用: stun.l.google.com:19302")
+    except ImportError:
+        logger.warning("无法导入 aioice，跳过 STUN 补丁")
+
+
 @router.post("/webrtc/offer/{task_id}")
 async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     """WebRTC 信令端点：接收 SDP offer，返回 SDP answer"""
     from aiortc import RTCPeerConnection, RTCSessionDescription
+
+    _patch_aioice_stun()
 
     async with _state_lock:
         if task_id not in _task_status:
