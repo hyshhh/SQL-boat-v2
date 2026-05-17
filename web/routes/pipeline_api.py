@@ -1731,6 +1731,16 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
             os.dup2(pipe_w, 1)
 
             try:
+                # ── 等待 WebRTC track 就绪（仅 WebRTC 模式） ──
+                # 避免 pipeline 在信令/ICE 完成前就超时退出
+                ready_evt = _webrtc_ready_events.pop(task_id, None)
+                if ready_evt:
+                    logger.info("等待 WebRTC 视频 track 就绪...")
+                    if not ready_evt.wait(timeout=60):
+                        logger.error("等待 WebRTC 视频 track 就绪超时 (60s)")
+                        raise TimeoutError("等待 WebRTC 视频 track 就绪超时")
+                    logger.info("WebRTC 视频 track 已就绪，启动 pipeline")
+
                 vc = VirtualCamera(frame_queue=frame_queue, fps=15.0)
                 pipeline = ShipPipeline(config=config)
                 stats = pipeline.process(source=vc, display=False, max_frames=req.max_frames)
@@ -1772,12 +1782,17 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
                 sem.release()
                 _pipeline_logs.pop(task_id, None)
                 _log_start.pop(task_id, None)
+                _webrtc_ready_events.pop(task_id, None)
                 _cleanup_stream_dir(task_id)
 
             asyncio.run_coroutine_threadsafe(_finish(), _main_loop)
 
         # 捕获主循环引用，供线程内使用
         _main_loop = asyncio.get_event_loop()
+
+        # WebRTC 模式：创建同步事件，让 pipeline 线程等待 track 就绪后再启动
+        if req.stream_mode == "webrtc":
+            _webrtc_ready_events[task_id] = threading.Event()
 
         thread = threading.Thread(target=_run_pipeline, name=f"pipeline-{task_id}", daemon=True)
         thread.start()
@@ -1791,6 +1806,7 @@ async def start_browser_camera(req: BrowserCameraStartRequest):
         os.close(pipe_r)
         os.close(pipe_w)
         _frame_queues.pop(task_id, None)
+        _webrtc_ready_events.pop(task_id, None)
         async with _state_lock:
             _task_status[task_id]["status"] = "failed"
             _task_status[task_id]["error"] = str(e)
@@ -1926,6 +1942,8 @@ async def _receive_mjpeg_camera_frames(
 
 # 每个 task 对应一个 PeerConnection，停止时需要关闭
 _webrtc_pcs: dict[str, Any] = {}
+# 用于同步 pipeline 线程等待 WebRTC track 就绪
+_webrtc_ready_events: dict[str, threading.Event] = {}
 
 
 async def _receive_webrtc_camera_frames(
@@ -1934,6 +1952,7 @@ async def _receive_webrtc_camera_frames(
     frame_queue: queue.Queue | None,
     use_queue: bool,
     frames_dir: Path | None,
+    video_track=None,
 ):
     """WebRTC 模式：从 RTCPeerConnection 的视频 track 读取帧 → pipeline 队列"""
     import cv2
@@ -1944,16 +1963,21 @@ async def _receive_webrtc_camera_frames(
     async with _state_lock:
         _task_status[task_id]["progress"] = "WebRTC 已连接，等待视频帧..."
 
-    # 获取远程视频 track
-    video_track = None
-    for t in pc.getReceivers():
-        if t.track and t.track.kind == "video":
-            video_track = t.track
-            break
+    # 如果未通过 track 事件提供 track，回退到轮询 getReceivers()
+    if video_track is None:
+        for t in pc.getReceivers():
+            if t.track and t.track.kind == "video":
+                video_track = t.track
+                break
 
     if video_track is None:
         logger.error("WebRTC 无视频 track: %s", task_id)
         _webrtc_pcs.pop(task_id, None)
+        if use_queue and frame_queue:
+            try:
+                frame_queue.put_nowait(None)
+            except queue.Full:
+                pass
         await pc.close()
         return
 
@@ -2061,12 +2085,30 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     pc = RTCPeerConnection()
     _webrtc_pcs[task_id] = pc
 
+    # 通过 track 事件获取视频 track（比轮询 getReceivers() 更可靠）
+    video_track = None
+
+    @pc.on("track")
+    def on_track(track):
+        nonlocal video_track
+        if track.kind == "video" and video_track is None:
+            video_track = track
+            logger.info("WebRTC 视频 track 已就绪: %s", task_id)
+            # 通知等待的 pipeline 线程
+            ready_evt = _webrtc_ready_events.pop(task_id, None)
+            if ready_evt:
+                ready_evt.set()
+
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         logger.info("WebRTC 连接状态: %s, task=%s", pc.connectionState, task_id)
         # 只在确定失败时关闭，disconnected 是临时状态可能恢复
         if pc.connectionState in ("failed", "closed"):
             _webrtc_pcs.pop(task_id, None)
+            # 通知 pipeline 线程（连接失败，无需继续等待）
+            ready_evt = _webrtc_ready_events.pop(task_id, None)
+            if ready_evt:
+                ready_evt.set()
             try:
                 await asyncio.wait_for(pc.close(), timeout=3.0)
             except Exception:
@@ -2080,9 +2122,9 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # 启动帧接收（后台任务）
+    # 启动帧接收（后台任务），直接传入 track（避免 getReceivers() 竞态）
     asyncio.create_task(_receive_webrtc_camera_frames(
-        pc, task_id, frame_queue, use_queue, frames_dir
+        pc, task_id, frame_queue, use_queue, frames_dir, video_track
     ))
 
     return {
