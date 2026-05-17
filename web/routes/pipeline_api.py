@@ -2173,6 +2173,9 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
             for m in re.finditer(r'a=candidate:\S+ \S+ udp \S+ \S+ (\d+) typ host', req.sdp):
                 client_port = int(m.group(1))
                 break
+            # 从 SDP 提取 mid（如 "video" 或 "0"）
+            mid_match = re.search(r'a=mid:(\S+)', req.sdp)
+            sdp_mid = mid_match.group(1) if mid_match else "0"
             synthetic = RTCIceCandidate(
                 component=1,
                 foundation="synthetic",
@@ -2181,6 +2184,8 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
                 priority=0,
                 protocol="udp",
                 type="srflx",
+                sdpMid=sdp_mid,
+                sdpMLineIndex=0,
             )
             await pc.addIceCandidate(synthetic)
             logger.info("注入客户端公网候选: %s:%d (STUN 回退), task=%s, _remote_candidates=%d",
