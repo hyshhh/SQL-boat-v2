@@ -2058,54 +2058,6 @@ class WebRTCOfferRequest(BaseModel):
     type: str = "offer"
 
 
-# ── 内嵌 STUN 服务器 ──
-# 客户端向它查询公网 IP 时，NAT 映射绑定到本服务器 IP，
-# 后续 WebRTC 连通性检查就能穿透 NAT。
-_STUN_MAGIC = 0x2112A442
-_stun_transport = None
-
-
-class _StunProtocol(asyncio.DatagramProtocol):
-    def connection_made(self, transport):
-        self.transport = transport
-
-    def datagram_received(self, data: bytes, addr: tuple):
-        if len(data) < 20:
-            return
-        msg_type = int.from_bytes(data[0:2], 'big')
-        msg_len = int.from_bytes(data[2:4], 'big')
-        magic = int.from_bytes(data[4:8], 'big')
-        if msg_type != 0x0001 or magic != _STUN_MAGIC:
-            return  # 只处理 Binding Request
-        tx_id = data[8:20]
-        client_ip, client_port = addr
-
-        # 构造 XOR-MAPPED-ADDRESS (type=0x0020)
-        import struct
-        ip_bytes = bytes(int(octet) ^ (( _STUN_MAGIC >> (8 * (3 - i))) & 0xFF)
-                         for i, octet in enumerate(client_ip.split('.')))
-        x_port = client_port ^ 0x2112
-        xma = struct.pack('!BBH', 0x00, 0x01, x_port) + ip_bytes  # family=IPv4
-        attr = struct.pack('!HH', 0x0020, len(xma)) + xma
-
-        # 填充到 4 字节边界
-        padding = (4 - len(attr) % 4) % 4
-        attr += b'\x00' * padding
-
-        # Binding Response (type=0x0101)
-        resp = struct.pack('!HHI', 0x0101, len(attr), _STUN_MAGIC) + tx_id + attr
-        self.transport.sendto(resp, addr)
-        logger.debug("STUN 响应: %s:%d → %s:%d", client_ip, client_port, client_ip, client_port)
-
-
-async def _start_stun_server():
-    global _stun_transport
-    loop = asyncio.get_event_loop()
-    _stun_transport, _ = await loop.create_datagram_endpoint(
-        _StunProtocol, local_addr=('0.0.0.0', 3478))
-    logger.info("STUN 服务器已启动: UDP 0.0.0.0:3478")
-
-
 # 服务端 STUN 探索：让 aioice Connection 默认使用 Google STUN 获取 srflx 公网候选
 _PATCHED_AIOICE_STUN = False
 
@@ -2118,7 +2070,7 @@ def _patch_aioice_stun():
         orig_init = aioice.ice.Connection.__init__
         def _patched_init(self, *args, **kwargs):
             if 'stun_server' not in kwargs or kwargs['stun_server'] is None:
-                kwargs['stun_server'] = ('stun.l.google.com', 19302)
+                kwargs['stun_server'] = ('218.106.147.53', 3478)
             orig_init(self, *args, **kwargs)
         aioice.ice.Connection.__init__ = _patched_init
         _PATCHED_AIOICE_STUN = True

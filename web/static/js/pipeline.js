@@ -1032,9 +1032,11 @@ function setupWebRTCCamera(taskId, stream) {
 
   async function connect() {
     try {
+      const TURN_HOST = '218.106.147.53';
       pc = new RTCPeerConnection({
         iceServers: [
-          { urls: `stun:${location.hostname}:3478` },
+          { urls: `stun:${TURN_HOST}:3478` },
+          { urls: `turn:${TURN_HOST}:3478`, username: 'webrtc', credential: 'webrtc123' },
           { urls: 'stun:stun.l.google.com:19302' },
         ],
       });
