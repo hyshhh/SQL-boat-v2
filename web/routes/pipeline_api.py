@@ -2080,7 +2080,7 @@ def _patch_aioice_stun():
 
 
 @router.post("/webrtc/offer/{task_id}")
-async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
+async def webrtc_offer(task_id: str, req: WebRTCOfferRequest, request: Request):
     """WebRTC 信令端点：接收 SDP offer，返回 SDP answer"""
     from aiortc import RTCPeerConnection, RTCSessionDescription
 
@@ -2140,6 +2140,47 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     # 设置远程描述（浏览器的 offer）
     offer = RTCSessionDescription(sdp=req.sdp, type=req.type)
     await pc.setRemoteDescription(offer)
+
+    # 注入合成 srflx 候选：从 HTTP 连接提取客户端公网 IP，
+    # 弥补客户端 STUN 失败（网络拦截）导致只有私网候选的问题。
+    # 端口取自 SDP 中的 host 候选（对端口保留型 NAT 有效）。
+    try:
+        import re
+        from aiortc import RTCIceCandidate
+        client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if not client_ip:
+            client_ip = request.headers.get("x-real-ip", "").strip()
+        if not client_ip and request.client:
+            client_ip = request.client.host
+        def _is_private(ip: str) -> bool:
+            if ip.startswith(("10.", "192.168.", "127.", "::1", "fc", "fd")):
+                return True
+            if ip.startswith("172."):
+                try:
+                    second = int(ip.split(".")[1])
+                    return 16 <= second <= 31
+                except (ValueError, IndexError):
+                    pass
+            return False
+        if client_ip and not _is_private(client_ip):
+            # 从 SDP 提取客户端 host 候选的端口
+            client_port = 0
+            for m in re.finditer(r'a=candidate:\S+ \S+ udp \S+ \S+ (\d+) typ host', req.sdp):
+                client_port = int(m.group(1))
+                break
+            synthetic = RTCIceCandidate(
+                component=1,
+                foundation="synthetic",
+                ip=client_ip,
+                port=client_port,
+                priority=0,
+                protocol="udp",
+                type="srflx",
+            )
+            await pc.addIceCandidate(synthetic)
+            logger.info("注入客户端公网候选: %s:%d (STUN 回退), task=%s", client_ip, client_port, task_id)
+    except Exception as e:
+        logger.debug("注入合成候选失败: %s", e)
 
     # 创建 answer
     answer = await pc.createAnswer()
