@@ -1025,9 +1025,10 @@ function setupH264CameraWs(wsUrl, stream) {
   };
 }
 
-/** WebRTC 模式：浏览器直连服务器，超低延迟推流 */
+/** WebRTC 模式：浏览器直连服务器，超低延迟推流（连接超时自动降级到 H264 WebSocket） */
 function setupWebRTCCamera(taskId, stream) {
   let pc = null;
+  let webrtcConnected = false;
 
   async function connect() {
     try {
@@ -1102,6 +1103,32 @@ function setupWebRTCCamera(taskId, stream) {
         }).catch(() => {});
       });
 
+      // 等待 WebRTC 连接建立，超时自动降级
+      await new Promise((resolve, reject) => {
+        const FALLBACK_TIMEOUT = 10000;
+        const timer = setTimeout(() => {
+          if (!webrtcConnected) {
+            reject(new Error('timeout'));
+          }
+        }, FALLBACK_TIMEOUT);
+        pc.addEventListener('connectionstatechange', () => {
+          if (pc.connectionState === 'connected') {
+            webrtcConnected = true;
+            clearTimeout(timer);
+            resolve();
+          } else if (pc.connectionState === 'failed') {
+            clearTimeout(timer);
+            reject(new Error('failed'));
+          }
+        });
+        // 已经 connected 的情况
+        if (pc.connectionState === 'connected') {
+          webrtcConnected = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+
       showToast('摄像头已连接 (WebRTC)，开始推流');
       updateCameraStatus('running', 'WebRTC 推流中...');
       document.getElementById('btnStartCamera').style.display = 'none';
@@ -1110,18 +1137,17 @@ function setupWebRTCCamera(taskId, stream) {
       connectCameraH264(taskId);
       startCameraPolling();
 
-      browserCameraTimer = true; // 标记正在推流
-
-      pc.addEventListener('connectionstatechange', () => {
-        if (pc.connectionState === 'failed') {
-          showToast('WebRTC 连接失败', 'error');
-        }
-      });
+      browserCameraTimer = true;
 
     } catch (e) {
-      console.error('WebRTC 连接失败:', e);
-      showToast('WebRTC 连接失败: ' + e.message, 'error');
+      // WebRTC 失败或超时，自动降级到 H264 WebSocket
+      console.warn('WebRTC 连接失败，降级到 H264 WebSocket:', e.message);
       if (pc) { pc.close(); pc = null; }
+
+      showToast('WebRTC 不可用，自动切换到 H264 WebSocket 模式', 'info');
+      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsUrl = `${wsProto}://${location.host}${PIPE_API}/ws/camera/${taskId}`;
+      setupH264CameraWs(wsUrl, stream);
     }
   }
 
