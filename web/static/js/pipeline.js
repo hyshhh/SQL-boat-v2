@@ -990,9 +990,9 @@ function setupH264CameraWs(wsUrl, stream) {
         console.error('MediaRecorder 错误:', e.error);
         showToast('编码出错，已停止推流', 'error');
       };
-      // timeslice=50ms: 产出频率约 20 chunk/s，降低延迟
-      recorder.start(50);
-      console.log(`[H264 Camera] MediaRecorder 已启动, timeslice=50ms`);
+      // timeslice=100ms: 产出频率约 10 chunk/s，平衡延迟和解码稳定性
+      recorder.start(100);
+      console.log(`[H264 Camera] MediaRecorder 已启动, timeslice=100ms`);
     } catch (e) {
       console.error('MediaRecorder 创建失败:', e);
       showToast('编码启动失败: ' + e.message, 'error');
