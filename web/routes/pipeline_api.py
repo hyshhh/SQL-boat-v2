@@ -2156,6 +2156,43 @@ async def webrtc_offer(task_id: str, req: WebRTCOfferRequest):
     }
 
 
+class WebRTCCandidateRequest(BaseModel):
+    candidate: str | None
+    sdpMid: str | None
+    sdpMLineIndex: int | None
+
+
+@router.post("/webrtc/candidate/{task_id}")
+async def webrtc_candidate(task_id: str, req: WebRTCCandidateRequest):
+    """接收 WebRTC trickle ICE 候选（STUN 响应可能晚于 offer）
+    
+    浏览器在 sendOffer 之后才收到 STUN 服务器的公网 IP 响应，
+    通过此端点补齐 ICE 候选，让服务端也能发现客户端的公网候选。
+    """
+    from aiortc import RTCIceCandidate
+
+    pc = _webrtc_pcs.get(task_id)
+    if pc is None:
+        raise HTTPException(status_code=404, detail="WebRTC 连接不存在")
+    if not req.candidate:
+        return {"ok": True}
+    try:
+        candidate = RTCIceCandidate(
+            component=1,
+            foundation="0",
+            ip=req.candidate.split()[3] if req.candidate else "",
+            port=int(req.candidate.split()[4]) if req.candidate else 0,
+            priority=0,
+            protocol="udp",
+            type="srflx",
+        )
+        await pc.addIceCandidate(candidate)
+        logger.debug("WebRTC 已添加 trickle candidate: %s, task=%s", req.candidate, task_id)
+    except Exception as e:
+        logger.debug("WebRTC trickle candidate 添加失败: %s, task=%s", e, task_id)
+    return {"ok": True}
+
+
 async def _receive_h264_camera_frames(
     websocket: WebSocket, task_id: str,
     frame_queue: queue.Queue | None, use_queue: bool,

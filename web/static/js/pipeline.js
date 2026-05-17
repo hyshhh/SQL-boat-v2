@@ -1085,6 +1085,20 @@ function setupWebRTCCamera(taskId, stream) {
       const answer = await resp.json();
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
+      // Trickle ICE：offer 发出后 STUN 公网候选才到，补发给服务端
+      pc.addEventListener('icecandidate', (e) => {
+        if (!e.candidate) return;
+        fetch(`${PIPE_API}/webrtc/candidate/${taskId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            candidate: e.candidate.candidate,
+            sdpMid: e.candidate.sdpMid,
+            sdpMLineIndex: e.candidate.sdpMLineIndex,
+          }),
+        }).catch(() => {});
+      });
+
       showToast('摄像头已连接 (WebRTC)，开始推流');
       updateCameraStatus('running', 'WebRTC 推流中...');
       document.getElementById('btnStartCamera').style.display = 'none';
