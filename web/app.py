@@ -41,6 +41,14 @@ async def lifespan(app: FastAPI):
 
     config = load_config()
     app.state.ship_service = ShipService(config=config)
+
+    # 启动内嵌 STUN 服务器
+    try:
+        from web.routes.pipeline_api import _start_stun_server
+        await _start_stun_server()
+    except Exception as e:
+        logging.getLogger(__name__).warning("STUN 服务器启动失败: %s", e)
+
     yield
     logging.getLogger(__name__).info("Web 服务关闭")
 
