@@ -1038,8 +1038,11 @@ function setupWebRTCCamera(taskId, stream) {
       // 添加摄像头轨道
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-      // ICE 候选收集（带超时，防止永远挂起）
-      const offer = await pc.createOffer();
+      // ICE 候选收集：等待 srflx（STUN 公网）候选就绪后再发 offer
+      const offer = await pc.createOffer({
+        offerToReceiveVideo: true,
+        offerToReceiveAudio: false,
+      });
       await pc.setLocalDescription(offer);
 
       await new Promise((resolve) => {
@@ -1047,11 +1050,17 @@ function setupWebRTCCamera(taskId, stream) {
           resolve();
           return;
         }
+        let hasSrflx = false;
         const timer = setTimeout(() => {
           resolve();
         }, 15000);
+        pc.addEventListener('icecandidate', (e) => {
+          if (e.candidate && e.candidate.type === 'srflx') {
+            hasSrflx = true;
+          }
+        });
         pc.addEventListener('icegatheringstatechange', () => {
-          if (pc.iceGatheringState === 'complete') {
+          if (pc.iceGatheringState === 'complete' && hasSrflx) {
             clearTimeout(timer);
             resolve();
           }
